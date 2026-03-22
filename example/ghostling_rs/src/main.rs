@@ -15,6 +15,98 @@ use ghostty::{
 };
 use raylib::prelude::*;
 
+/// Embedded monospace font used by the renderer.
+///
+/// Using a specific TTF keeps glyph metrics and rasterization behavior aligned
+/// with upstream ghostling and avoids platform-dependent defaults.
+const JETBRAINS_MONO_TTF: &[u8] = include_bytes!("../fonts/JetBrainsMono-Regular.ttf");
+
+/// Unicode blocks to bake into the font atlas.
+///
+/// Raylib defaults to 95 printable ASCII codepoints when none are provided,
+/// which causes many prompt symbols and terminal drawing characters to render
+/// as '?'. We load a broader terminal-focused set to avoid that fallback.
+const TERMINAL_FONT_CODEPOINT_RANGES: &[(u32, u32)] = &[
+    (0x0020, 0x007E), // Basic Latin
+    (0x00A0, 0x00FF), // Latin-1 Supplement
+    (0x0100, 0x024F), // Latin Extended
+    (0x0370, 0x03FF), // Greek
+    (0x0400, 0x052F), // Cyrillic
+    (0x2000, 0x206F), // General punctuation
+    (0x20A0, 0x20CF), // Currency symbols
+    (0x2100, 0x214F), // Letterlike symbols
+    (0x2190, 0x21FF), // Arrows
+    (0x2200, 0x22FF), // Math operators
+    (0x2300, 0x23FF), // Misc technical
+    (0x2460, 0x24FF), // Enclosed alphanumerics
+    (0x2500, 0x259F), // Box drawing + block elements
+    (0x25A0, 0x25FF), // Geometric shapes
+    (0x2600, 0x27BF), // Misc symbols + dingbats (includes ❯)
+    (0x2800, 0x28FF), // Braille patterns
+    (0x2B00, 0x2BFF), // Misc symbols and arrows
+    (0xE0A0, 0xE0D7), // Powerline private-use symbols
+];
+
+fn build_terminal_font_codepoints() -> Result<Vec<i32>, String> {
+    let mut codepoints: Vec<i32> = Vec::new();
+
+    for &(start, end) in TERMINAL_FONT_CODEPOINT_RANGES {
+        if start > end {
+            return Err(format!(
+                "invalid codepoint range for terminal font atlas: U+{start:04X}..=U+{end:04X}"
+            ));
+        }
+
+        for cp in start..=end {
+            let cp_i32 = i32::try_from(cp)
+                .map_err(|_| format!("codepoint out of range for raylib: U+{cp:04X}"))?;
+            codepoints.push(cp_i32);
+        }
+    }
+
+    if codepoints.is_empty() {
+        return Err("terminal font codepoint set must not be empty".to_owned());
+    }
+
+    Ok(codepoints)
+}
+
+fn load_embedded_mono_font(font_size_px: i32) -> Result<Font, String> {
+    if font_size_px <= 0 {
+        return Err(format!("font_size_px must be greater than zero, got {font_size_px}"));
+    }
+
+    let file_type = std::ffi::CString::new(".ttf")
+        .map_err(|error| format!("invalid embedded font extension: {error}"))?;
+    let font_data_len = i32::try_from(JETBRAINS_MONO_TTF.len())
+        .map_err(|_| "embedded font is too large for raylib API".to_owned())?;
+    let codepoints = build_terminal_font_codepoints()?;
+    let codepoint_count = i32::try_from(codepoints.len())
+        .map_err(|_| "font codepoint set is too large for raylib API".to_owned())?;
+
+    let raw_font = unsafe {
+        raylib::ffi::LoadFontFromMemory(
+            file_type.as_ptr(),
+            JETBRAINS_MONO_TTF.as_ptr(),
+            font_data_len,
+            font_size_px,
+            codepoints.as_ptr().cast_mut(),
+            codepoint_count,
+        )
+    };
+
+    if raw_font.glyphs.is_null() || raw_font.texture.id == 0 {
+        return Err("raylib failed to create a usable font atlas".to_owned());
+    }
+
+    let font = unsafe { Font::from_raw(raw_font) };
+    if !font.is_font_valid() {
+        return Err("raylib produced invalid font metadata".to_owned());
+    }
+
+    Ok(font)
+}
+
 // ---------------------------------------------------------------------------
 // PTY helpers
 // ---------------------------------------------------------------------------
@@ -978,6 +1070,11 @@ fn main() {
 fn run() -> Result<(), Box<dyn std::error::Error>> {
     log_build_info();
 
+    // Match upstream ghostling's HiDPI initialization flow.
+    unsafe {
+        raylib::ffi::SetConfigFlags(raylib::ffi::ConfigFlags::FLAG_WINDOW_HIGHDPI as u32);
+    }
+
     let font_size: i32 = 16;
     let (mut rl, thread) = raylib::init()
         .size(800, 600)
@@ -987,14 +1084,30 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
 
     rl.set_target_fps(60);
 
-    // Use raylib's default font. Replace with LoadFontFromMemory() and an
-    // embedded TTF (e.g. JetBrains Mono) for proper monospace rendering.
-    let mono_font = rl.get_font_default();
+    // Query window DPI so font rasterization happens at native pixel density.
+    let dpi_scale = rl.get_window_scale_dpi();
+    let dpi_x = if dpi_scale.x > 0.0 { dpi_scale.x } else { 1.0 };
+    let dpi_y = if dpi_scale.y > 0.0 { dpi_scale.y } else { 1.0 };
 
-    // Measure a glyph to determine cell dimensions.
-    let glyph_size = mono_font.measure_text("M", font_size as f32, 0.0);
-    let cell_width = (glyph_size.x as i32).max(1);
-    let cell_height = (glyph_size.y as i32).max(1);
+    // Load JetBrains Mono at DPI-scaled pixel size, matching upstream.
+    let font_size_px = ((font_size as f32 * dpi_y) as i32).max(1);
+    let mono_font =
+        load_embedded_mono_font(font_size_px).map_err(|error| {
+            format!("failed to load embedded JetBrains Mono font: {error}")
+        })?;
+
+    // The font atlas is already created at native resolution, so bilinear
+    // filtering smooths fractional positioning without magnification blur.
+    mono_font.texture().set_texture_filter(
+        &thread,
+        raylib::consts::TextureFilter::TEXTURE_FILTER_BILINEAR,
+    );
+
+    // Measure a representative glyph in pixel space, then convert back to
+    // logical screen space for terminal cell layout math.
+    let glyph_size = mono_font.measure_text("M", font_size_px as f32, 0.0);
+    let cell_width = ((glyph_size.x / dpi_x) as i32).max(1);
+    let cell_height = ((glyph_size.y / dpi_y) as i32).max(1);
 
     let pad = 4;
     let scr_w = rl.get_screen_width();
