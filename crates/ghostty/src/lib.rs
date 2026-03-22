@@ -665,6 +665,136 @@ impl Drop for RenderState {
 // RenderStateRowIterator
 // ---------------------------------------------------------------------------
 
+fn render_state_row_iterator_next(
+    ptr: NonNull<ffi::GhosttyRenderStateRowIterator>,
+) -> bool {
+    unsafe { ffi::ghostty_render_state_row_iterator_next(ptr.as_ptr()) }
+}
+
+fn render_state_row_get_dirty(
+    ptr: NonNull<ffi::GhosttyRenderStateRowIterator>,
+) -> Result<bool, Error> {
+    let mut value = false;
+    let result = unsafe {
+        ffi::ghostty_render_state_row_get(
+            ptr.as_ptr(),
+            ffi::GhosttyRenderStateRowData_GHOSTTY_RENDER_STATE_ROW_DATA_DIRTY,
+            std::ptr::from_mut(&mut value).cast(),
+        )
+    };
+    from_result(result)?;
+    Ok(value)
+}
+
+fn render_state_row_get_raw(
+    ptr: NonNull<ffi::GhosttyRenderStateRowIterator>,
+) -> Result<ffi::GhosttyRow, Error> {
+    let mut value: ffi::GhosttyRow = 0;
+    let result = unsafe {
+        ffi::ghostty_render_state_row_get(
+            ptr.as_ptr(),
+            ffi::GhosttyRenderStateRowData_GHOSTTY_RENDER_STATE_ROW_DATA_RAW,
+            std::ptr::from_mut(&mut value).cast(),
+        )
+    };
+    from_result(result)?;
+    Ok(value)
+}
+
+fn render_state_row_populate_cells(
+    ptr: NonNull<ffi::GhosttyRenderStateRowIterator>,
+    cells: &mut RenderStateRowCells,
+) -> Result<(), Error> {
+    let result = unsafe {
+        ffi::ghostty_render_state_row_get(
+            ptr.as_ptr(),
+            ffi::GhosttyRenderStateRowData_GHOSTTY_RENDER_STATE_ROW_DATA_CELLS,
+            std::ptr::from_mut(&mut cells.ptr).cast::<std::ffi::c_void>(),
+        )
+    };
+    from_result(result)
+}
+
+fn render_state_row_set_dirty(
+    ptr: NonNull<ffi::GhosttyRenderStateRowIterator>,
+    dirty: bool,
+) -> Result<(), Error> {
+    let result = unsafe {
+        ffi::ghostty_render_state_row_set(
+            ptr.as_ptr(),
+            ffi::GhosttyRenderStateRowOption_GHOSTTY_RENDER_STATE_ROW_OPTION_DIRTY,
+            std::ptr::from_ref(&dirty).cast(),
+        )
+    };
+    from_result(result)
+}
+
+fn render_state_row_cells_next(
+    ptr: NonNull<ffi::GhosttyRenderStateRowCells>,
+) -> bool {
+    unsafe { ffi::ghostty_render_state_row_cells_next(ptr.as_ptr()) }
+}
+
+fn render_state_row_cell_get_raw(
+    ptr: NonNull<ffi::GhosttyRenderStateRowCells>,
+) -> Result<ffi::GhosttyCell, Error> {
+    let mut value: ffi::GhosttyCell = 0;
+    let result = unsafe {
+        ffi::ghostty_render_state_row_cells_get(
+            ptr.as_ptr(),
+            ffi::GhosttyRenderStateRowCellsData_GHOSTTY_RENDER_STATE_ROW_CELLS_DATA_RAW,
+            std::ptr::from_mut(&mut value).cast(),
+        )
+    };
+    from_result(result)?;
+    Ok(value)
+}
+
+fn render_state_row_cell_get_style(
+    ptr: NonNull<ffi::GhosttyRenderStateRowCells>,
+) -> Result<ffi::GhosttyStyle, Error> {
+    let mut value = ffi::GhosttyStyle::default();
+    value.size = std::mem::size_of::<ffi::GhosttyStyle>();
+    let result = unsafe {
+        ffi::ghostty_render_state_row_cells_get(
+            ptr.as_ptr(),
+            ffi::GhosttyRenderStateRowCellsData_GHOSTTY_RENDER_STATE_ROW_CELLS_DATA_STYLE,
+            std::ptr::from_mut(&mut value).cast(),
+        )
+    };
+    from_result(result)?;
+    Ok(value)
+}
+
+fn render_state_row_cell_get_graphemes_len(
+    ptr: NonNull<ffi::GhosttyRenderStateRowCells>,
+) -> Result<u32, Error> {
+    let mut value: u32 = 0;
+    let result = unsafe {
+        ffi::ghostty_render_state_row_cells_get(
+            ptr.as_ptr(),
+            ffi::GhosttyRenderStateRowCellsData_GHOSTTY_RENDER_STATE_ROW_CELLS_DATA_GRAPHEMES_LEN,
+            std::ptr::from_mut(&mut value).cast(),
+        )
+    };
+    from_result(result)?;
+    Ok(value)
+}
+
+fn render_state_row_cell_get_graphemes_buf(
+    ptr: NonNull<ffi::GhosttyRenderStateRowCells>,
+    buf: &mut [u32],
+) -> Result<(), Error> {
+    let result = unsafe {
+        ffi::ghostty_render_state_row_cells_get(
+            ptr.as_ptr(),
+            ffi::GhosttyRenderStateRowCellsData_GHOSTTY_RENDER_STATE_ROW_CELLS_DATA_GRAPHEMES_BUF,
+            buf.as_mut_ptr().cast(),
+        )
+    };
+    from_result(result)
+}
+
 pub struct RenderStateRowIterator {
     ptr: NonNull<ffi::GhosttyRenderStateRowIterator>,
     _not_send_sync: PhantomData<*mut ()>,
@@ -683,56 +813,81 @@ impl RenderStateRowIterator {
         })
     }
 
-    pub fn next(&mut self) -> bool {
-        unsafe { ffi::ghostty_render_state_row_iterator_next(self.ptr.as_ptr()) }
+    pub fn advance(&mut self) -> bool {
+        render_state_row_iterator_next(self.ptr)
     }
 
     pub fn dirty(&self) -> Result<bool, Error> {
-        let mut value = false;
-        let result = unsafe {
-            ffi::ghostty_render_state_row_get(
-                self.ptr.as_ptr(),
-                ffi::GhosttyRenderStateRowData_GHOSTTY_RENDER_STATE_ROW_DATA_DIRTY,
-                std::ptr::from_mut(&mut value).cast(),
-            )
-        };
-        from_result(result)?;
-        Ok(value)
+        render_state_row_get_dirty(self.ptr)
     }
 
     pub fn raw_row(&self) -> Result<ffi::GhosttyRow, Error> {
-        let mut value: ffi::GhosttyRow = 0;
-        let result = unsafe {
-            ffi::ghostty_render_state_row_get(
-                self.ptr.as_ptr(),
-                ffi::GhosttyRenderStateRowData_GHOSTTY_RENDER_STATE_ROW_DATA_RAW,
-                std::ptr::from_mut(&mut value).cast(),
-            )
-        };
-        from_result(result)?;
-        Ok(value)
+        render_state_row_get_raw(self.ptr)
     }
 
     pub fn populate_cells(&self, cells: &mut RenderStateRowCells) -> Result<(), Error> {
-        let result = unsafe {
-            ffi::ghostty_render_state_row_get(
-                self.ptr.as_ptr(),
-                ffi::GhosttyRenderStateRowData_GHOSTTY_RENDER_STATE_ROW_DATA_CELLS,
-                std::ptr::from_mut(&mut cells.ptr).cast::<std::ffi::c_void>(),
-            )
-        };
-        from_result(result)
+        render_state_row_populate_cells(self.ptr, cells)
     }
 
     pub fn set_dirty(&mut self, dirty: bool) -> Result<(), Error> {
-        let result = unsafe {
-            ffi::ghostty_render_state_row_set(
-                self.ptr.as_ptr(),
-                ffi::GhosttyRenderStateRowOption_GHOSTTY_RENDER_STATE_ROW_OPTION_DIRTY,
-                std::ptr::from_ref(&dirty).cast(),
-            )
-        };
-        from_result(result)
+        render_state_row_set_dirty(self.ptr, dirty)
+    }
+
+    pub fn rows(&mut self) -> RenderStateRows<'_> {
+        RenderStateRows {
+            ptr: self.ptr,
+            _not_send_sync: PhantomData,
+        }
+    }
+}
+
+pub struct RenderStateRows<'a> {
+    ptr: NonNull<ffi::GhosttyRenderStateRowIterator>,
+    _not_send_sync: PhantomData<&'a mut RenderStateRowIterator>,
+}
+
+/// View into the row currently selected by a `RenderStateRows` iterator.
+///
+/// This is a cursor view over the underlying C iterator state, not a copied
+/// row snapshot. Advancing the parent iterator changes which row this view
+/// points at.
+pub struct RenderStateRow<'a> {
+    ptr: NonNull<ffi::GhosttyRenderStateRowIterator>,
+    _not_send_sync: PhantomData<&'a mut RenderStateRowIterator>,
+}
+
+impl<'a> Iterator for RenderStateRows<'a> {
+    type Item = RenderStateRow<'a>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if render_state_row_iterator_next(self.ptr) {
+            Some(RenderStateRow {
+                ptr: self.ptr,
+                _not_send_sync: PhantomData,
+            })
+        } else {
+            None
+        }
+    }
+}
+
+impl std::iter::FusedIterator for RenderStateRows<'_> {}
+
+impl RenderStateRow<'_> {
+    pub fn dirty(&self) -> Result<bool, Error> {
+        render_state_row_get_dirty(self.ptr)
+    }
+
+    pub fn raw_row(&self) -> Result<ffi::GhosttyRow, Error> {
+        render_state_row_get_raw(self.ptr)
+    }
+
+    pub fn populate_cells(&self, cells: &mut RenderStateRowCells) -> Result<(), Error> {
+        render_state_row_populate_cells(self.ptr, cells)
+    }
+
+    pub fn set_dirty(&self, dirty: bool) -> Result<(), Error> {
+        render_state_row_set_dirty(self.ptr, dirty)
     }
 }
 
@@ -764,8 +919,8 @@ impl RenderStateRowCells {
         })
     }
 
-    pub fn next(&mut self) -> bool {
-        unsafe { ffi::ghostty_render_state_row_cells_next(self.ptr.as_ptr()) }
+    pub fn advance(&mut self) -> bool {
+        render_state_row_cells_next(self.ptr)
     }
 
     pub fn select(&mut self, x: u16) -> Result<(), Error> {
@@ -775,54 +930,76 @@ impl RenderStateRowCells {
     }
 
     pub fn raw_cell(&self) -> Result<ffi::GhosttyCell, Error> {
-        let mut value: ffi::GhosttyCell = 0;
-        let result = unsafe {
-            ffi::ghostty_render_state_row_cells_get(
-                self.ptr.as_ptr(),
-                ffi::GhosttyRenderStateRowCellsData_GHOSTTY_RENDER_STATE_ROW_CELLS_DATA_RAW,
-                std::ptr::from_mut(&mut value).cast(),
-            )
-        };
-        from_result(result)?;
-        Ok(value)
+        render_state_row_cell_get_raw(self.ptr)
     }
 
     pub fn style(&self) -> Result<ffi::GhosttyStyle, Error> {
-        let mut value = ffi::GhosttyStyle::default();
-        value.size = std::mem::size_of::<ffi::GhosttyStyle>();
-        let result = unsafe {
-            ffi::ghostty_render_state_row_cells_get(
-                self.ptr.as_ptr(),
-                ffi::GhosttyRenderStateRowCellsData_GHOSTTY_RENDER_STATE_ROW_CELLS_DATA_STYLE,
-                std::ptr::from_mut(&mut value).cast(),
-            )
-        };
-        from_result(result)?;
-        Ok(value)
+        render_state_row_cell_get_style(self.ptr)
     }
 
     pub fn graphemes_len(&self) -> Result<u32, Error> {
-        let mut value: u32 = 0;
-        let result = unsafe {
-            ffi::ghostty_render_state_row_cells_get(
-                self.ptr.as_ptr(),
-                ffi::GhosttyRenderStateRowCellsData_GHOSTTY_RENDER_STATE_ROW_CELLS_DATA_GRAPHEMES_LEN,
-                std::ptr::from_mut(&mut value).cast(),
-            )
-        };
-        from_result(result)?;
-        Ok(value)
+        render_state_row_cell_get_graphemes_len(self.ptr)
     }
 
     pub fn graphemes_buf(&self, buf: &mut [u32]) -> Result<(), Error> {
-        let result = unsafe {
-            ffi::ghostty_render_state_row_cells_get(
-                self.ptr.as_ptr(),
-                ffi::GhosttyRenderStateRowCellsData_GHOSTTY_RENDER_STATE_ROW_CELLS_DATA_GRAPHEMES_BUF,
-                buf.as_mut_ptr().cast(),
-            )
-        };
-        from_result(result)
+        render_state_row_cell_get_graphemes_buf(self.ptr, buf)
+    }
+
+    pub fn cells(&mut self) -> RenderStateCells<'_> {
+        RenderStateCells {
+            ptr: self.ptr,
+            _not_send_sync: PhantomData,
+        }
+    }
+}
+
+pub struct RenderStateCells<'a> {
+    ptr: NonNull<ffi::GhosttyRenderStateRowCells>,
+    _not_send_sync: PhantomData<&'a mut RenderStateRowCells>,
+}
+
+/// View into the cell currently selected by a `RenderStateCells` iterator.
+///
+/// This is a cursor view over the underlying C iterator state, not a copied
+/// cell snapshot. Advancing the parent iterator changes which cell this view
+/// points at.
+pub struct RenderStateCell<'a> {
+    ptr: NonNull<ffi::GhosttyRenderStateRowCells>,
+    _not_send_sync: PhantomData<&'a mut RenderStateRowCells>,
+}
+
+impl<'a> Iterator for RenderStateCells<'a> {
+    type Item = RenderStateCell<'a>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if render_state_row_cells_next(self.ptr) {
+            Some(RenderStateCell {
+                ptr: self.ptr,
+                _not_send_sync: PhantomData,
+            })
+        } else {
+            None
+        }
+    }
+}
+
+impl std::iter::FusedIterator for RenderStateCells<'_> {}
+
+impl RenderStateCell<'_> {
+    pub fn raw_cell(&self) -> Result<ffi::GhosttyCell, Error> {
+        render_state_row_cell_get_raw(self.ptr)
+    }
+
+    pub fn style(&self) -> Result<ffi::GhosttyStyle, Error> {
+        render_state_row_cell_get_style(self.ptr)
+    }
+
+    pub fn graphemes_len(&self) -> Result<u32, Error> {
+        render_state_row_cell_get_graphemes_len(self.ptr)
+    }
+
+    pub fn graphemes_buf(&self, buf: &mut [u32]) -> Result<(), Error> {
+        render_state_row_cell_get_graphemes_buf(self.ptr, buf)
     }
 }
 

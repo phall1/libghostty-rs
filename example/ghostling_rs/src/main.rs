@@ -767,21 +767,21 @@ fn render_terminal(
     let pad = 4;
     let mut y = pad;
 
-    while row_iter.next() {
-        if row_iter.populate_cells(cells).is_err() {
+    for row in row_iter.rows() {
+        if row.populate_cells(cells).is_err() {
             y += cell_height;
             continue;
         }
 
         let mut x = pad;
 
-        while cells.next() {
-            let grapheme_len = cells.graphemes_len().unwrap_or(0);
+        for cell in cells.cells() {
+            let grapheme_len = cell.graphemes_len().unwrap_or(0);
 
             if grapheme_len == 0 {
                 // Empty cell -- check for background-only content (palette
                 // or direct RGB background without text).
-                if let Ok(raw_cell) = cells.raw_cell() {
+                if let Ok(raw_cell) = cell.raw_cell() {
                     if let Ok(content_tag) = ghostty::cell_get_content_tag(raw_cell) {
                         if content_tag
                             == ffi::GhosttyCellContentTag_GHOSTTY_CELL_CONTENT_BG_COLOR_PALETTE
@@ -812,7 +812,7 @@ fn render_terminal(
             // Read grapheme codepoints and encode to a UTF-8 string.
             let mut codepoints = [0u32; 16];
             let len = grapheme_len.min(16) as usize;
-            let _ = cells.graphemes_buf(&mut codepoints[..len]);
+            let _ = cell.graphemes_buf(&mut codepoints[..len]);
 
             let mut text_buf = [0u8; 64];
             let mut pos: usize = 0;
@@ -828,7 +828,7 @@ fn render_terminal(
             text_buf[pos] = 0; // null-terminate for CStr
 
             // Resolve foreground, background, and style flags.
-            let style = cells.style().unwrap_or_else(|_| {
+            let style = cell.style().unwrap_or_else(|_| {
                 let mut s = ffi::GhosttyStyle::default();
                 s.size = std::mem::size_of::<ffi::GhosttyStyle>();
                 s
@@ -881,7 +881,7 @@ fn render_terminal(
 
         // Mark the row as clean so we don't redraw it unnecessarily
         // on the next frame (the render state tracks per-row dirty flags).
-        let _ = row_iter.set_dirty(false);
+        let _ = row.set_dirty(false);
         y += cell_height;
     }
 
