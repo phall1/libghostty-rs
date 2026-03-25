@@ -105,8 +105,22 @@ impl Terminal {
         unsafe { ffi::ghostty_terminal_vt_write(self.ptr.as_ptr(), data.as_ptr(), data.len()) }
     }
 
-    pub fn resize(&mut self, cols: u16, rows: u16) -> Result<(), Error> {
-        let result = unsafe { ffi::ghostty_terminal_resize(self.ptr.as_ptr(), cols, rows) };
+    pub fn resize(
+        &mut self,
+        cols: u16,
+        rows: u16,
+        cell_width_px: u32,
+        cell_height_px: u32,
+    ) -> Result<(), Error> {
+        let result = unsafe {
+            ffi::ghostty_terminal_resize(
+                self.ptr.as_ptr(),
+                cols,
+                rows,
+                cell_width_px,
+                cell_height_px,
+            )
+        };
         from_result(result)
     }
 
