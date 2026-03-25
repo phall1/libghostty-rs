@@ -231,6 +231,138 @@ impl Terminal {
         from_result(result)?;
         Ok(value)
     }
+
+    // -----------------------------------------------------------------------
+    // Terminal effects callbacks
+    // -----------------------------------------------------------------------
+
+    /// Sets the userdata pointer passed to all callbacks.
+    ///
+    /// # Safety
+    /// The caller must ensure the pointer remains valid for the lifetime of
+    /// the terminal or until replaced.
+    pub unsafe fn set_userdata(&mut self, userdata: *mut std::ffi::c_void) -> Result<(), Error> {
+        let result = unsafe {
+            ffi::ghostty_terminal_set(
+                self.ptr.as_ptr(),
+                ffi::GhosttyTerminalOption_GHOSTTY_TERMINAL_OPT_USERDATA,
+                std::ptr::from_ref(&userdata).cast(),
+            )
+        };
+        from_result(result)
+    }
+
+    /// Sets the callback invoked when the terminal needs to write bytes to
+    /// the PTY (DA1, DSR, DECRPM, etc.).
+    pub fn set_write_pty_callback(
+        &mut self,
+        cb: ffi::GhosttyTerminalWritePtyFn,
+    ) -> Result<(), Error> {
+        let result = unsafe {
+            ffi::ghostty_terminal_set(
+                self.ptr.as_ptr(),
+                ffi::GhosttyTerminalOption_GHOSTTY_TERMINAL_OPT_WRITE_PTY,
+                std::ptr::from_ref(&cb).cast(),
+            )
+        };
+        from_result(result)
+    }
+
+    /// Sets the callback invoked on BEL character.
+    pub fn set_bell_callback(&mut self, cb: ffi::GhosttyTerminalBellFn) -> Result<(), Error> {
+        let result = unsafe {
+            ffi::ghostty_terminal_set(
+                self.ptr.as_ptr(),
+                ffi::GhosttyTerminalOption_GHOSTTY_TERMINAL_OPT_BELL,
+                std::ptr::from_ref(&cb).cast(),
+            )
+        };
+        from_result(result)
+    }
+
+    /// Sets the callback invoked on ENQ character.
+    pub fn set_enquiry_callback(&mut self, cb: ffi::GhosttyTerminalEnquiryFn) -> Result<(), Error> {
+        let result = unsafe {
+            ffi::ghostty_terminal_set(
+                self.ptr.as_ptr(),
+                ffi::GhosttyTerminalOption_GHOSTTY_TERMINAL_OPT_ENQUIRY,
+                std::ptr::from_ref(&cb).cast(),
+            )
+        };
+        from_result(result)
+    }
+
+    /// Sets the callback invoked on XTVERSION query.
+    pub fn set_xtversion_callback(
+        &mut self,
+        cb: ffi::GhosttyTerminalXtversionFn,
+    ) -> Result<(), Error> {
+        let result = unsafe {
+            ffi::ghostty_terminal_set(
+                self.ptr.as_ptr(),
+                ffi::GhosttyTerminalOption_GHOSTTY_TERMINAL_OPT_XTVERSION,
+                std::ptr::from_ref(&cb).cast(),
+            )
+        };
+        from_result(result)
+    }
+
+    /// Sets the callback invoked on OSC 0/2 title changes.
+    pub fn set_title_changed_callback(
+        &mut self,
+        cb: ffi::GhosttyTerminalTitleChangedFn,
+    ) -> Result<(), Error> {
+        let result = unsafe {
+            ffi::ghostty_terminal_set(
+                self.ptr.as_ptr(),
+                ffi::GhosttyTerminalOption_GHOSTTY_TERMINAL_OPT_TITLE_CHANGED,
+                std::ptr::from_ref(&cb).cast(),
+            )
+        };
+        from_result(result)
+    }
+
+    /// Sets the callback invoked on XTWINOPS size query.
+    pub fn set_size_callback(&mut self, cb: ffi::GhosttyTerminalSizeFn) -> Result<(), Error> {
+        let result = unsafe {
+            ffi::ghostty_terminal_set(
+                self.ptr.as_ptr(),
+                ffi::GhosttyTerminalOption_GHOSTTY_TERMINAL_OPT_SIZE,
+                std::ptr::from_ref(&cb).cast(),
+            )
+        };
+        from_result(result)
+    }
+
+    /// Sets the callback invoked on color scheme query.
+    pub fn set_color_scheme_callback(
+        &mut self,
+        cb: ffi::GhosttyTerminalColorSchemeFn,
+    ) -> Result<(), Error> {
+        let result = unsafe {
+            ffi::ghostty_terminal_set(
+                self.ptr.as_ptr(),
+                ffi::GhosttyTerminalOption_GHOSTTY_TERMINAL_OPT_COLOR_SCHEME,
+                std::ptr::from_ref(&cb).cast(),
+            )
+        };
+        from_result(result)
+    }
+
+    /// Sets the callback invoked on device attributes query.
+    pub fn set_device_attributes_callback(
+        &mut self,
+        cb: ffi::GhosttyTerminalDeviceAttributesFn,
+    ) -> Result<(), Error> {
+        let result = unsafe {
+            ffi::ghostty_terminal_set(
+                self.ptr.as_ptr(),
+                ffi::GhosttyTerminalOption_GHOSTTY_TERMINAL_OPT_DEVICE_ATTRIBUTES,
+                std::ptr::from_ref(&cb).cast(),
+            )
+        };
+        from_result(result)
+    }
 }
 
 impl Drop for Terminal {
