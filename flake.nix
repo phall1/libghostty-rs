@@ -100,11 +100,11 @@
             pkgs.cmake
             pkgs.ninja
           ] ++ pkgs.lib.optionals pkgs.stdenv.hostPlatform.isLinux [
-            pkgs.xorg.libX11
-            pkgs.xorg.libXcursor
-            pkgs.xorg.libXrandr
-            pkgs.xorg.libXinerama
-            pkgs.xorg.libXi
+            pkgs.libx11
+            pkgs.libxcursor
+            pkgs.libxrandr
+            pkgs.libxinerama
+            pkgs.libxi
             pkgs.libGL
             pkgs.libxkbcommon
             pkgs.wayland
@@ -121,7 +121,13 @@
             export PATH=$(echo "$PATH" | tr ':' '\n' | grep -v xcbuild | tr '\n' ':')
           '' + pkgs.lib.optionalString pkgs.stdenv.hostPlatform.isLinux ''
             # Make Ghostling able to find libGL on Linux.
-            export LD_LIBRARY_PATH="$LD_LIBRARY_PATH:${pkgs.libglvnd}/lib"
+            export LD_LIBRARY_PATH="$LD_LIBRARY_PATH:${pkgs.lib.makeLibraryPath [
+              pkgs.libglvnd
+              pkgs.wayland
+              pkgs.libx11
+              pkgs.libxkbcommon
+              pkgs.libxi
+            ]}"
           '';
         };
       }

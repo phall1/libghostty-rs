@@ -12,6 +12,7 @@
 //!     *  Set event properties (action, key, modifiers, etc.)
 //!     *  Encode with [`Encoder::encode`]
 use crate::{
+    Error,
     alloc::{Allocator, Object},
     error::{Result, from_result, from_result_with_len},
     ffi,
@@ -55,6 +56,21 @@ impl<'alloc> Encoder<'alloc> {
     /// Encode a key event into a terminal escape sequence.
     ///
     /// Converts a key event into the appropriate terminal escape sequence
+    /// based on the encoder's current options.
+    ///
+    /// Not all key events produce output. For example, unmodified modifier
+    /// keys typically don't generate escape sequences. Check the returned
+    /// `Vec` to determine if any data was written.
+    pub fn encode_to_vec(&mut self, event: &Event) -> Result<Vec<u8>> {
+        let len = self.encode_len(event)?;
+        let mut v = vec![0u8; len];
+        self.encode(event, &mut v)?;
+        Ok(v)
+    }
+
+    /// Encode a key event into a terminal escape sequence.
+    ///
+    /// Converts a key event into the appropriate terminal escape sequence
     /// based on the encoder's current options. The sequence is written to
     /// the provided buffer.
     ///
@@ -78,6 +94,24 @@ impl<'alloc> Encoder<'alloc> {
             )
         };
         from_result_with_len(result, written)
+    }
+
+    pub fn encode_len(&mut self, event: &Event) -> Result<usize> {
+        let mut written: usize = 0;
+        let result = unsafe {
+            ffi::ghostty_key_encoder_encode(
+                self.0.as_raw(),
+                event.0.as_raw(),
+                std::ptr::null_mut(),
+                0,
+                &mut written,
+            )
+        };
+        match from_result(result) {
+            Err(Error::OutOfSpace { .. }) => Ok(written),
+            Ok(_) => Ok(0),
+            Err(e) => Err(e),
+        }
     }
 
     /// Set encoder options from a terminal's current state.
@@ -202,8 +236,9 @@ impl<'alloc> Event<'alloc> {
         Ok(Self(Object::new(raw)?))
     }
 
-    pub fn set_action(&mut self, action: Action) {
+    pub fn with_action(&mut self, action: Action) -> &mut Self {
         unsafe { ffi::ghostty_key_event_set_action(self.0.as_raw(), action.into()) }
+        self
     }
 
     pub fn action(&self) -> Action {
@@ -211,8 +246,9 @@ impl<'alloc> Event<'alloc> {
             .unwrap_or(Action::Press)
     }
 
-    pub fn set_key(&mut self, key: Key) {
+    pub fn with_key(&mut self, key: Key) -> &mut Self {
         unsafe { ffi::ghostty_key_event_set_key(self.0.as_raw(), key.into()) }
+        self
     }
 
     pub fn key(&self) -> Key {
@@ -220,31 +256,34 @@ impl<'alloc> Event<'alloc> {
             .unwrap_or(Key::Unidentified)
     }
 
-    pub fn set_mods(&mut self, mods: Mods) {
+    pub fn with_mods(&mut self, mods: Mods) -> &mut Self {
         unsafe { ffi::ghostty_key_event_set_mods(self.0.as_raw(), mods.bits()) }
+        self
     }
 
     pub fn mods(&self) -> Mods {
         Mods::from_bits_retain(unsafe { ffi::ghostty_key_event_get_mods(self.0.as_raw()) })
     }
 
-    pub fn set_consumed_mods(&mut self, mods: Mods) {
+    pub fn with_consumed_mods(&mut self, mods: Mods) -> &mut Self {
         unsafe { ffi::ghostty_key_event_set_consumed_mods(self.0.as_raw(), mods.bits()) }
+        self
     }
 
     pub fn consumed_mods(&self) -> Mods {
         Mods::from_bits_retain(unsafe { ffi::ghostty_key_event_get_consumed_mods(self.0.as_raw()) })
     }
 
-    pub fn set_composing(&mut self, composing: bool) {
+    pub fn with_composing(&mut self, composing: bool) -> &mut Self {
         unsafe { ffi::ghostty_key_event_set_composing(self.0.as_raw(), composing) }
+        self
     }
 
     pub fn is_composing(&self) -> bool {
         unsafe { ffi::ghostty_key_event_get_composing(self.0.as_raw()) }
     }
 
-    pub fn set_utf8(&mut self, text: Option<&str>) {
+    pub fn with_utf8(&mut self, text: Option<&str>) -> &mut Self {
         match text {
             Some(text) => unsafe {
                 ffi::ghostty_key_event_set_utf8(self.0.as_raw(), text.as_ptr().cast(), text.len())
@@ -253,6 +292,7 @@ impl<'alloc> Event<'alloc> {
                 ffi::ghostty_key_event_set_utf8(self.0.as_raw(), std::ptr::null(), 0)
             },
         }
+        self
     }
 
     pub fn utf8(&mut self) -> Option<&str> {
@@ -266,8 +306,9 @@ impl<'alloc> Event<'alloc> {
         Some(unsafe { std::str::from_utf8_unchecked(slice) })
     }
 
-    pub fn set_unshifted_codepoint(&mut self, codepoint: char) {
+    pub fn with_unshifted_codepoint(&mut self, codepoint: char) -> &mut Self {
         unsafe { ffi::ghostty_key_event_set_unshifted_codepoint(self.0.as_raw(), codepoint.into()) }
+        self
     }
 
     pub fn unshifted_codepoint(&self) -> char {

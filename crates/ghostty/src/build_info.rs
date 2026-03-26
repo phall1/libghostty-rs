@@ -46,7 +46,7 @@ pub fn supports_tmux_control_mode() -> Result<bool> {
 }
 
 /// The optimization mode the library was built with.
-pub fn optimization_mode() -> Result<OptimizeMode> {
+pub fn optimize_mode() -> Result<OptimizeMode> {
     build_info::<ffi::GhosttyOptimizeMode>(ffi::GhosttyBuildInfo_GHOSTTY_BUILD_INFO_OPTIMIZE)
         .and_then(|v| v.try_into().map_err(|_| Error::InvalidValue))
 }
@@ -56,7 +56,7 @@ fn build_info<T>(tag: ffi::GhosttyBuildInfo) -> Result<T> {
     let result = unsafe { ffi::ghostty_build_info(tag, std::ptr::from_mut(&mut value).cast()) };
     from_result(result)?;
     // SAFETY: Value should be initialized after successful call.
-    unsafe { value.assume_init() }
+    Ok(unsafe { value.assume_init() })
 }
 
 #[repr(u32)]

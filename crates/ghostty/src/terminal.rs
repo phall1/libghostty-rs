@@ -449,11 +449,11 @@ impl From<ScrollViewport> for ffi::GhosttyTerminalScrollViewport {
                 value: ffi::GhosttyTerminalScrollViewportValue::default(),
             },
             ScrollViewport::Bottom => Self {
-                tag: ffi::GhosttyTerminalScrollViewportTag_GHOSTTY_SCROLL_VIEWPORT_TOP,
+                tag: ffi::GhosttyTerminalScrollViewportTag_GHOSTTY_SCROLL_VIEWPORT_BOTTOM,
                 value: ffi::GhosttyTerminalScrollViewportValue::default(),
             },
             ScrollViewport::Delta(delta) => Self {
-                tag: ffi::GhosttyTerminalScrollViewportTag_GHOSTTY_SCROLL_VIEWPORT_TOP,
+                tag: ffi::GhosttyTerminalScrollViewportTag_GHOSTTY_SCROLL_VIEWPORT_DELTA,
                 value: {
                     let mut v = ffi::GhosttyTerminalScrollViewportValue::default();
                     v.delta = delta;
