@@ -175,7 +175,8 @@ async fn main() -> Result<(), Box<dyn Error>> {
         // pty's winsize (so the child shell knows about the new size and
         // can send SIGWINCH to its foreground process group).
         if dims.update() {
-            grid_size.set(dims.grid_size());
+            let (cols, rows) = dims.grid_size();
+            grid_size.set((cols, rows));
             terminal.resize(cols, rows, dims.cell_width as u32, dims.cell_height as u32)?;
             pty.resize(dims);
         }
