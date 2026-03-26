@@ -124,7 +124,7 @@ impl<'alloc> Encoder<'alloc> {
         self
     }
     /// Set mouse tracking mode.
-    pub fn with_tracking_mode(&mut self, value: TrackingMode) -> &mut Self {
+    pub fn set_tracking_mode(&mut self, value: TrackingMode) -> &mut Self {
         unsafe {
             self.setopt(
                 ffi::GhosttyMouseEncoderOption_GHOSTTY_MOUSE_ENCODER_OPT_EVENT,
@@ -134,7 +134,7 @@ impl<'alloc> Encoder<'alloc> {
         self
     }
     /// Set mouse output format.
-    pub fn with_format(&mut self, value: Format) -> &mut Self {
+    pub fn set_format(&mut self, value: Format) -> &mut Self {
         unsafe {
             self.setopt(
                 ffi::GhosttyMouseEncoderOption_GHOSTTY_MOUSE_ENCODER_OPT_EVENT,

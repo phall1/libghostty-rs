@@ -485,18 +485,18 @@ fn handle_keyboard_input<'alloc>(
         };
 
         event
-            .with_action(action)
-            .with_key(key)
-            .with_mods(keyboard_mods())
-            .with_unshifted_codepoint(ucp)
-            .with_utf8(maybe_text);
+            .set_action(action)
+            .set_key(key)
+            .set_mods(keyboard_mods())
+            .set_unshifted_codepoint(ucp)
+            .set_utf8(maybe_text);
 
         if maybe_text.is_some() {
             text.clear();
         }
 
         let key_seq = encoder
-            .with_options_from_terminal(terminal)
+            .set_options_from_terminal(terminal)
             .encode_to_vec(event)?;
 
         if !key_seq.is_empty() {
