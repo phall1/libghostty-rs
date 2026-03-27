@@ -12,6 +12,8 @@
 //!     *  Set event properties (action, button, modifiers, position).
 //!     *  Encode with [`Encoder::encode`].
 
+use std::mem::MaybeUninit;
+
 use crate::{
     alloc::{Allocator, Object},
     error::{Error, Result, from_result, from_result_with_len},
@@ -60,16 +62,29 @@ impl<'alloc> Encoder<'alloc> {
     /// Encode a key event into a terminal escape sequence.
     ///
     /// Converts a key event into the appropriate terminal escape sequence
-    /// based on the encoder's current options.
+    /// based on the encoder's current options. The provided `Vec` byte buffer
+    /// will be grown automatically if more capacity is needed.
     ///
     /// Not all key events produce output. For example, unmodified modifier
     /// keys typically don't generate escape sequences. Check the returned
-    /// `Vec` to determine if any data was written.
-    pub fn encode_to_vec(&mut self, event: &Event) -> Result<Vec<u8>> {
-        let len = self.encode_len(event)?;
-        let mut v = vec![0u8; len];
-        self.encode(event, &mut v)?;
-        Ok(v)
+    /// `usize` to determine if any data was written.
+    pub fn encode_to_vec(&mut self, event: &Event, vec: &mut Vec<u8>) -> Result<()> {
+        let remaining = vec.capacity() - vec.len();
+
+        let written = match self.encode_to_uninit_buf(event, vec.spare_capacity_mut()) {
+            Ok(v) => Ok(v),
+            Err(Error::OutOfSpace { required }) => {
+                // Retry with more capacity
+                vec.reserve(required - remaining);
+                self.encode_to_uninit_buf(event, vec.spare_capacity_mut())
+            }
+            Err(e) => Err(e),
+        };
+
+        // SAFETY: A successful call to `encode_to_uninit_buf` assures us
+        // that a `written` number of bytes have been initialized.
+        unsafe { vec.set_len(vec.len() + written?) };
+        Ok(())
     }
 
     /// Encode a mouse event into a terminal escape sequence.
@@ -79,6 +94,17 @@ impl<'alloc> Encoder<'alloc> {
     /// If the output buffer is too small, this returns
     /// `Err(Error::OutOfSpace { required })` where `required` is the required size.
     pub fn encode(&mut self, event: &Event, buf: &mut [u8]) -> Result<usize> {
+        // SAFETY: It is always safe to reinterpret T as a MaybeUninit<T>.
+        self.encode_to_uninit_buf(event, unsafe {
+            std::slice::from_raw_parts_mut(buf.as_mut_ptr().cast(), buf.len())
+        })
+    }
+
+    fn encode_to_uninit_buf(
+        &mut self,
+        event: &Event,
+        buf: &mut [MaybeUninit<u8>],
+    ) -> Result<usize> {
         let mut written: usize = 0;
         let result = unsafe {
             ffi::ghostty_mouse_encoder_encode(
@@ -90,24 +116,6 @@ impl<'alloc> Encoder<'alloc> {
             )
         };
         from_result_with_len(result, written)
-    }
-
-    pub fn encode_len(&mut self, event: &Event) -> Result<usize> {
-        let mut written: usize = 0;
-        let result = unsafe {
-            ffi::ghostty_mouse_encoder_encode(
-                self.0.as_raw(),
-                event.0.as_raw(),
-                std::ptr::null_mut(),
-                0,
-                &mut written,
-            )
-        };
-        match from_result(result) {
-            Err(Error::OutOfSpace { .. }) => Ok(written),
-            Ok(_) => Ok(0),
-            Err(e) => Err(e),
-        }
     }
 
     /// Set encoder options from a terminal's current state.

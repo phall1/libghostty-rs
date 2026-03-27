@@ -155,6 +155,10 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let mut mouse_encoder = mouse::Encoder::new()?;
     let mut mouse_event = mouse::Event::new()?;
 
+    // Byte buffer that holds escape sequences that are used to
+    // notify the PTY of new key and mouse input events.
+    let mut response = Vec::<u8>::with_capacity(64);
+
     println!(
         "ghostling-rs | simd: {}, optimize: {:?}",
         if build_info::supports_simd()? {
@@ -186,15 +190,20 @@ async fn main() -> Result<(), Box<dyn Error>> {
         match child {
             Child::Active(pid) => {
                 // Forward keyboard/mouse input only while the child is alive.
-                handle_keyboard_input(&mut key_encoder, &mut key_event, &pty, &terminal)?;
+                handle_keyboard_input(&mut key_encoder, &mut key_event, &terminal, &mut response)?;
 
                 handle_mouse_input(
                     &mut mouse_encoder,
                     &mut mouse_event,
-                    &pty,
                     &mut terminal,
                     dims,
+                    &mut response,
                 )?;
+
+                // Write the composed response back to the PTY,
+                // and clear it in preparation of the next frame.
+                pty.write(&response);
+                response.clear();
 
                 match pty.read(&mut terminal) {
                     Ok(_) => {}
@@ -464,8 +473,8 @@ impl Dimensions {
 fn handle_keyboard_input<'alloc>(
     encoder: &mut key::Encoder<'alloc>,
     event: &mut key::Event<'alloc>,
-    pty: &Pty,
     terminal: &Terminal<'alloc, '_>,
+    response: &mut Vec<u8>,
 ) -> Result<(), ghostty::Error> {
     // Drain printable characters from macroquad's input queue.  We collect
     // them into a single UTF-8 buffer so the encoder can attach text
@@ -521,15 +530,13 @@ fn handle_keyboard_input<'alloc>(
             text.clear();
         }
 
-        let key_seq = encoder
+        encoder
             // Sync encoder options from the terminal so mode changes (e.g.
             // application cursor keys, Kitty keyboard protocol) are honoured.
             .set_options_from_terminal(terminal)
-            .encode_to_vec(event)?;
+            .encode_to_vec(event, response)?;
 
-        if !key_seq.is_empty() {
-            pty.write(&key_seq);
-
+        if !response.is_empty() {
             // Text was consumed by the encoder — clear it so the
             // fallback below doesn't double-send.
             text.clear();
@@ -541,9 +548,8 @@ fn handle_keyboard_input<'alloc>(
     // no key event consumed it, write it directly to the PTY so input
     // isn't silently dropped.
     if !text.is_empty() {
-        pty.write(text.as_bytes());
+        response.extend_from_slice(text.as_bytes());
     }
-
     Ok(())
 }
 
@@ -555,9 +561,9 @@ fn handle_keyboard_input<'alloc>(
 fn handle_mouse_input<'alloc>(
     encoder: &mut mouse::Encoder<'alloc>,
     event: &mut mouse::Event<'alloc>,
-    pty: &Pty,
     terminal: &mut Terminal<'alloc, '_>,
     dims: Dimensions,
+    response: &mut Vec<u8>,
 ) -> Result<(), ghostty::Error> {
     // Track whether any button is currently held — the encoder uses
     // this to distinguish drags from plain motion.
@@ -603,7 +609,7 @@ fn handle_mouse_input<'alloc>(
         };
 
         event.set_action(action).set_button(Some(btn));
-        pty.write(&encoder.encode_to_vec(event)?);
+        encoder.encode_to_vec(event, response)?;
     }
 
     // Mouse motion — send a motion event with whatever button is held
@@ -616,7 +622,7 @@ fn handle_mouse_input<'alloc>(
                 .find(|(mb, _)| is_mouse_button_down(*mb))
                 .map(|(_, btn)| btn),
         );
-        pty.write(&encoder.encode_to_vec(event)?);
+        encoder.encode_to_vec(event, response)?;
     }
 
     // Scroll wheel handling.  When a mouse tracking mode is active the
@@ -646,10 +652,10 @@ fn handle_mouse_input<'alloc>(
             event
                 .set_button(Some(scroll_btn))
                 .set_action(mouse::Action::Press);
-            pty.write(&encoder.encode_to_vec(event)?);
+            encoder.encode_to_vec(event, response)?;
 
             event.set_action(mouse::Action::Release);
-            pty.write(&encoder.encode_to_vec(event)?);
+            encoder.encode_to_vec(event, response)?;
         } else {
             // Scroll the viewport through scrollback. Adapt
             // the scroll delta to the wheel/touchpad velocity
@@ -659,7 +665,6 @@ fn handle_mouse_input<'alloc>(
             terminal.scroll_viewport(ScrollViewport::Delta(scroll_delta));
         }
     }
-
     Ok(())
 }
 

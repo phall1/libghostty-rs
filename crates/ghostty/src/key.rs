@@ -11,6 +11,8 @@
 //!     *  Create a key event with [`Event::new`] (or reuse an existing one)
 //!     *  Set event properties (action, key, modifiers, etc.)
 //!     *  Encode with [`Encoder::encode`]
+use std::mem::MaybeUninit;
+
 use crate::{
     Error,
     alloc::{Allocator, Object},
@@ -61,11 +63,23 @@ impl<'alloc> Encoder<'alloc> {
     /// Not all key events produce output. For example, unmodified modifier
     /// keys typically don't generate escape sequences. Check the returned
     /// `Vec` to determine if any data was written.
-    pub fn encode_to_vec(&mut self, event: &Event) -> Result<Vec<u8>> {
-        let len = self.encode_len(event)?;
-        let mut v = vec![0u8; len];
-        self.encode(event, &mut v)?;
-        Ok(v)
+    pub fn encode_to_vec(&mut self, event: &Event, vec: &mut Vec<u8>) -> Result<()> {
+        let remaining = vec.capacity() - vec.len();
+
+        let written = match self.encode_to_uninit_buf(event, vec.spare_capacity_mut()) {
+            Ok(v) => Ok(v),
+            Err(Error::OutOfSpace { required }) => {
+                // Retry with more capacity
+                vec.reserve(required - remaining);
+                self.encode_to_uninit_buf(event, vec.spare_capacity_mut())
+            }
+            Err(e) => Err(e),
+        };
+
+        // SAFETY: A successful call to `encode_to_uninit_buf` assures us
+        // that a `written` number of bytes have been initialized.
+        unsafe { vec.set_len(vec.len() + written?) };
+        Ok(())
     }
 
     /// Encode a key event into a terminal escape sequence.
@@ -83,6 +97,17 @@ impl<'alloc> Encoder<'alloc> {
     /// buffer size. The caller can then allocate a larger buffer and call
     /// the method again.
     pub fn encode(&mut self, event: &Event, buf: &mut [u8]) -> Result<usize> {
+        // SAFETY: It is always safe to reinterpret T as a MaybeUninit<T>.
+        self.encode_to_uninit_buf(event, unsafe {
+            std::slice::from_raw_parts_mut(buf.as_mut_ptr().cast(), buf.len())
+        })
+    }
+
+    fn encode_to_uninit_buf(
+        &mut self,
+        event: &Event,
+        buf: &mut [MaybeUninit<u8>],
+    ) -> Result<usize> {
         let mut written: usize = 0;
         let result = unsafe {
             ffi::ghostty_key_encoder_encode(
