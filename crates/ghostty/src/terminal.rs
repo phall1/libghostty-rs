@@ -10,6 +10,9 @@ use crate::{
     style,
 };
 
+#[doc(inline)]
+pub use ffi::GhosttySizeReportSize as SizeReportSize;
+
 /// Complete terminal emulator state and rendering.
 ///
 /// A terminal instance manages the full emulator state including the screen,
@@ -539,6 +542,163 @@ impl From<Mode> for ffi::GhosttyMode {
     }
 }
 
+/// Device attributes response data for all three DA levels.
+/// Filled by the [`Terminal::on_device_attributes`] callback in response
+/// to CSI c, CSI > c, or CSI = c queries. The terminal uses whichever
+/// sub-struct matches the request type.
+pub struct DeviceAttributes {
+    pub primary: PrimaryDeviceAttributes,
+    pub secondary: SecondaryDeviceAttributes,
+    pub tertiary: TertiaryDeviceAttributes,
+}
+
+impl From<DeviceAttributes> for ffi::GhosttyDeviceAttributes {
+    fn from(value: DeviceAttributes) -> Self {
+        Self {
+            primary: value.primary.into(),
+            secondary: value.secondary.into(),
+            tertiary: value.tertiary.into(),
+        }
+    }
+}
+
+/// Primary device attributes (DA1) response data.
+///
+/// Returned as part of [`DeviceAttributes`] in response to a CSI c query.
+pub struct PrimaryDeviceAttributes(ffi::GhosttyDeviceAttributesPrimary);
+
+impl PrimaryDeviceAttributes {
+    pub fn new<const N: usize>(
+        conformance_level: ConformanceLevel,
+        features: [DeviceAttributeFeature; N],
+    ) -> Self {
+        assert!(N <= 64);
+
+        let mut f = [0u16; 64];
+        f[..N].copy_from_slice(features.map(|f| f.0).as_slice());
+
+        Self(ffi::GhosttyDeviceAttributesPrimary {
+            conformance_level: conformance_level.0,
+            features: f,
+            num_features: N,
+        })
+    }
+}
+
+impl From<PrimaryDeviceAttributes> for ffi::GhosttyDeviceAttributesPrimary {
+    fn from(value: PrimaryDeviceAttributes) -> Self {
+        value.0
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub struct ConformanceLevel(pub u16);
+
+impl ConformanceLevel {
+    pub const VT100: Self = Self(ffi::GHOSTTY_DA_CONFORMANCE_VT100 as u16);
+    pub const VT101: Self = Self(ffi::GHOSTTY_DA_CONFORMANCE_VT101 as u16);
+    pub const VT102: Self = Self(ffi::GHOSTTY_DA_CONFORMANCE_VT102 as u16);
+    pub const VT125: Self = Self(ffi::GHOSTTY_DA_CONFORMANCE_VT125 as u16);
+    pub const VT131: Self = Self(ffi::GHOSTTY_DA_CONFORMANCE_VT131 as u16);
+    pub const VT132: Self = Self(ffi::GHOSTTY_DA_CONFORMANCE_VT132 as u16);
+    pub const VT220: Self = Self(ffi::GHOSTTY_DA_CONFORMANCE_VT220 as u16);
+    pub const VT240: Self = Self(ffi::GHOSTTY_DA_CONFORMANCE_VT240 as u16);
+    pub const VT320: Self = Self(ffi::GHOSTTY_DA_CONFORMANCE_VT320 as u16);
+    pub const VT340: Self = Self(ffi::GHOSTTY_DA_CONFORMANCE_VT340 as u16);
+    pub const VT420: Self = Self(ffi::GHOSTTY_DA_CONFORMANCE_VT420 as u16);
+    pub const VT510: Self = Self(ffi::GHOSTTY_DA_CONFORMANCE_VT510 as u16);
+    pub const VT520: Self = Self(ffi::GHOSTTY_DA_CONFORMANCE_VT520 as u16);
+    pub const VT525: Self = Self(ffi::GHOSTTY_DA_CONFORMANCE_VT525 as u16);
+    pub const LEVEL_2: Self = Self(ffi::GHOSTTY_DA_CONFORMANCE_LEVEL_2 as u16);
+    pub const LEVEL_3: Self = Self(ffi::GHOSTTY_DA_CONFORMANCE_LEVEL_3 as u16);
+    pub const LEVEL_4: Self = Self(ffi::GHOSTTY_DA_CONFORMANCE_LEVEL_4 as u16);
+    pub const LEVEL_5: Self = Self(ffi::GHOSTTY_DA_CONFORMANCE_LEVEL_5 as u16);
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub struct DeviceAttributeFeature(pub u16);
+
+impl DeviceAttributeFeature {
+    pub const COLUMNS_132: Self = Self(ffi::GHOSTTY_DA_FEATURE_COLUMNS_132 as u16);
+    pub const PRINTER: Self = Self(ffi::GHOSTTY_DA_FEATURE_PRINTER as u16);
+    pub const REGIS: Self = Self(ffi::GHOSTTY_DA_FEATURE_REGIS as u16);
+    pub const SIXEL: Self = Self(ffi::GHOSTTY_DA_FEATURE_SIXEL as u16);
+    pub const SELECTIVE_ERASE: Self = Self(ffi::GHOSTTY_DA_FEATURE_SELECTIVE_ERASE as u16);
+    pub const USER_DEFINED_KEYS: Self = Self(ffi::GHOSTTY_DA_FEATURE_USER_DEFINED_KEYS as u16);
+    pub const NATIONAL_REPLACEMENT: Self =
+        Self(ffi::GHOSTTY_DA_FEATURE_NATIONAL_REPLACEMENT as u16);
+    pub const TECHNICAL_CHARACTERS: Self =
+        Self(ffi::GHOSTTY_DA_FEATURE_TECHNICAL_CHARACTERS as u16);
+    pub const LOCATOR: Self = Self(ffi::GHOSTTY_DA_FEATURE_LOCATOR as u16);
+    pub const TERMINAL_STATE: Self = Self(ffi::GHOSTTY_DA_FEATURE_TERMINAL_STATE as u16);
+    pub const WINDOWING: Self = Self(ffi::GHOSTTY_DA_FEATURE_WINDOWING as u16);
+    pub const HORIZONTAL_SCROLLING: Self =
+        Self(ffi::GHOSTTY_DA_FEATURE_HORIZONTAL_SCROLLING as u16);
+    pub const ANSI_COLOR: Self = Self(ffi::GHOSTTY_DA_FEATURE_ANSI_COLOR as u16);
+    pub const RECTANGULAR_EDITING: Self = Self(ffi::GHOSTTY_DA_FEATURE_RECTANGULAR_EDITING as u16);
+    pub const ANSI_TEXT_LOCATOR: Self = Self(ffi::GHOSTTY_DA_FEATURE_ANSI_TEXT_LOCATOR as u16);
+    pub const CLIPBOARD: Self = Self(ffi::GHOSTTY_DA_FEATURE_CLIPBOARD as u16);
+}
+
+/// Secondary device attributes (DA2) response data.
+///
+/// Returned as part of [`DeviceAttributes`] in response to a CSI > c query.
+/// Response format: CSI > Pp ; Pv ; Pc c
+#[derive(Debug, Copy, Clone)]
+pub struct SecondaryDeviceAttributes {
+    /// Terminal type identifier (Pp).
+    pub device_type: DeviceType,
+    /// Firmware/patch version number (Pv).
+    pub firmware_version: u16,
+    /// ROM cartridge registration number (Pc). Always 0 for emulators.
+    pub rom_cartridge: u16,
+}
+
+impl From<SecondaryDeviceAttributes> for ffi::GhosttyDeviceAttributesSecondary {
+    fn from(value: SecondaryDeviceAttributes) -> Self {
+        Self {
+            device_type: value.device_type.0,
+            firmware_version: value.firmware_version,
+            rom_cartridge: value.rom_cartridge,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub struct DeviceType(pub u16);
+
+impl DeviceType {
+    pub const VT100: Self = Self(ffi::GHOSTTY_DA_DEVICE_TYPE_VT100 as u16);
+    pub const VT220: Self = Self(ffi::GHOSTTY_DA_DEVICE_TYPE_VT220 as u16);
+    pub const VT240: Self = Self(ffi::GHOSTTY_DA_DEVICE_TYPE_VT240 as u16);
+    pub const VT330: Self = Self(ffi::GHOSTTY_DA_DEVICE_TYPE_VT330 as u16);
+    pub const VT340: Self = Self(ffi::GHOSTTY_DA_DEVICE_TYPE_VT340 as u16);
+    pub const VT320: Self = Self(ffi::GHOSTTY_DA_DEVICE_TYPE_VT320 as u16);
+    pub const VT382: Self = Self(ffi::GHOSTTY_DA_DEVICE_TYPE_VT382 as u16);
+    pub const VT420: Self = Self(ffi::GHOSTTY_DA_DEVICE_TYPE_VT420 as u16);
+    pub const VT510: Self = Self(ffi::GHOSTTY_DA_DEVICE_TYPE_VT510 as u16);
+    pub const VT520: Self = Self(ffi::GHOSTTY_DA_DEVICE_TYPE_VT520 as u16);
+    pub const VT525: Self = Self(ffi::GHOSTTY_DA_DEVICE_TYPE_VT525 as u16);
+}
+
+/// Tertiary device attributes (DA3) response data.
+///
+/// Returned as part of [`DeviceAttributes`] in response to a CSI = c query.
+/// Response format: DCS ! | D...D ST (DECRPTUI).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub struct TertiaryDeviceAttributes {
+    /// Unit ID encoded as 8 uppercase hex digits in the response.
+    pub unit_id: u32,
+}
+
+impl From<TertiaryDeviceAttributes> for ffi::GhosttyDeviceAttributesTertiary {
+    fn from(value: TertiaryDeviceAttributes) -> Self {
+        Self {
+            unit_id: value.unit_id,
+        }
+    }
+}
+
 //---------------------------------------
 // Callbacks
 //---------------------------------------
@@ -792,11 +952,11 @@ handlers! {
         &mut self,
         tag = GhosttyTerminalOption_GHOSTTY_TERMINAL_OPT_DEVICE_ATTRIBUTES,
         from = GhosttyTerminalDeviceAttributesFn(out: *mut ffi::GhosttyDeviceAttributes) -> bool,
-        to = DeviceAttributesFn() -> Option<ffi::GhosttyDeviceAttributes>,
+        to = DeviceAttributesFn() -> Option<DeviceAttributes>,
     ) |term, func| {
         if let Some(size) = func(&term) {
             // SAFETY: Out pointer is assumed to be valid.
-            unsafe { *out = size };
+            unsafe { *out = size.into() };
             true
         } else {
             false

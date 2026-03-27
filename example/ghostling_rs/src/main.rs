@@ -16,12 +16,15 @@ use macroquad::{
 use nix::sys::wait;
 
 use ghostty::{
-    RenderState, Terminal, TerminalOptions, build_info, ffi,
+    RenderState, Terminal, TerminalOptions, build_info,
     key::{self, Key},
     mouse,
     render::{CellIterator, Colors, Dirty, RowIterator, Snapshot},
     style::RgbColor,
-    terminal::{Mode, ScrollViewport},
+    terminal::{
+        ConformanceLevel, DeviceAttributeFeature, DeviceAttributes, DeviceType, Mode,
+        PrimaryDeviceAttributes, ScrollViewport, SecondaryDeviceAttributes, SizeReportSize,
+    },
 };
 
 use crate::pty::{Child, Pty, PtyError};
@@ -93,9 +96,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
             let grid_size = grid_size.clone();
             move |_term| {
                 let (columns, rows) = grid_size.get();
-
-                // TODO: Port to native types
-                Some(ffi::GhosttySizeReportSize {
+                Some(SizeReportSize {
                     rows,
                     columns,
                     cell_width: dims.cell_width as u32,
@@ -107,27 +108,24 @@ async fn main() -> Result<(), Box<dyn Error>> {
         // terminal applications can identify the terminal's capabilities.
         // We report VT220-level conformance with a modest feature set.
         .on_device_attributes(|_term| {
-            let mut da1_features = [0u16; 64];
-            da1_features[0] = ffi::GHOSTTY_DA_FEATURE_COLUMNS_132 as u16;
-            da1_features[1] = ffi::GHOSTTY_DA_FEATURE_SELECTIVE_ERASE as u16;
-            da1_features[2] = ffi::GHOSTTY_DA_FEATURE_ANSI_COLOR as u16;
-
-            // TODO: Port to native types
-            Some(ffi::GhosttyDeviceAttributes {
+            Some(DeviceAttributes {
                 // DA1: VT220-level with a few common features.
-                primary: ffi::GhosttyDeviceAttributesPrimary {
-                    conformance_level: ffi::GHOSTTY_DA_CONFORMANCE_VT220 as u16,
-                    features: da1_features,
-                    num_features: 3,
-                },
+                primary: PrimaryDeviceAttributes::new(
+                    ConformanceLevel::VT220,
+                    [
+                        DeviceAttributeFeature::COLUMNS_132,
+                        DeviceAttributeFeature::SELECTIVE_ERASE,
+                        DeviceAttributeFeature::ANSI_COLOR,
+                    ],
+                ),
                 // DA2: VT220-type, version 1, no ROM cartridge.
-                secondary: ffi::GhosttyDeviceAttributesSecondary {
-                    device_type: ffi::GHOSTTY_DA_DEVICE_TYPE_VT220 as u16,
+                secondary: SecondaryDeviceAttributes {
+                    device_type: DeviceType::VT220,
                     firmware_version: 1,
                     rom_cartridge: 0,
                 },
-                // DA3: arbitrary unit id.
-                tertiary: ffi::GhosttyDeviceAttributesTertiary { unit_id: 0 },
+                // DA3: default unit id (0).
+                tertiary: Default::default(),
             })
         })?
         // xtversion effect — responds to CSI > q with our application name.
