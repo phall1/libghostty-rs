@@ -6,7 +6,7 @@ Rust bindings and safe API for [libghostty-vt](https://ghostty.org), the virtual
 
 - `crates/ghostty-sys` — raw FFI bindings generated from `ghostty/vt.h`
 - `crates/ghostty` — safe Rust wrappers (Terminal, RenderState, KeyEncoder, MouseEncoder, etc.)
-- `example/ghostling_rs` — Rust port of [ghostling](https://github.com/ghostty-org/ghostling), a minimal terminal emulator using raylib
+- `example/ghostling_rs` — Rust port of [ghostling](https://github.com/ghostty-org/ghostling), a minimal terminal emulator using [macroquad](https://macroquad.rs)
 
 ## Building
 
