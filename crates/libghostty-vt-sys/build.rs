@@ -7,6 +7,13 @@ const GHOSTTY_REPO: &str = "https://github.com/ghostty-org/ghostty.git";
 const GHOSTTY_COMMIT: &str = "bebca84668947bfc92b9a30ed58712e1c34eee1d";
 
 fn main() {
+    // docs.rs has no Zig toolchain. The checked-in bindings in src/bindings.rs
+    // are enough for generating documentation, so skip the entire native
+    // build when running under docs.rs.
+    if env::var("DOCS_RS").is_ok() {
+        return;
+    }
+
     println!("cargo:rerun-if-env-changed=LIBGHOSTTY_VT_SYS_NO_VENDOR");
     println!("cargo:rerun-if-env-changed=GHOSTTY_SOURCE_DIR");
     println!("cargo:rerun-if-env-changed=TARGET");
