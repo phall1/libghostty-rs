@@ -15,7 +15,7 @@ use crate::{
 /// Formatter that formats terminal content.
 #[derive(Debug)]
 pub struct Formatter<'t, 'alloc: 'cb, 'cb: 't> {
-    inner: Object<'alloc, ffi::GhosttyFormatter>,
+    inner: Object<'alloc, ffi::GhosttyFormatterImpl>,
     _terminal: PhantomData<&'t Terminal<'alloc, 'cb>>,
 }
 
@@ -55,7 +55,7 @@ impl<'t, 'alloc: 'cb, 'cb: 't> Formatter<'t, 'alloc, 'cb> {
         terminal: &'t Terminal<'alloc, 'cb>,
         opts: FormatterOptions,
     ) -> Result<Self> {
-        let mut raw: ffi::GhosttyFormatter_ptr = std::ptr::null_mut();
+        let mut raw: ffi::GhosttyFormatter = std::ptr::null_mut();
         let result = unsafe {
             ffi::ghostty_formatter_terminal_new(
                 alloc,

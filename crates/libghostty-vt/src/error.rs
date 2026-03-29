@@ -1,4 +1,6 @@
 //! Error handling.
+use std::mem::MaybeUninit;
+
 use crate::ffi;
 
 /// Convenient alias for fallible return values from libghostty-vt.
@@ -37,6 +39,20 @@ pub(crate) fn from_result(code: ffi::GhosttyResult) -> Result<()> {
         ffi::GhosttyResult_GHOSTTY_SUCCESS => Ok(()),
         ffi::GhosttyResult_GHOSTTY_OUT_OF_MEMORY => Err(Error::OutOfMemory),
         ffi::GhosttyResult_GHOSTTY_OUT_OF_SPACE => Err(Error::OutOfSpace { required: 0 }),
+        _ => Err(Error::InvalidValue),
+    }
+}
+
+pub(crate) fn from_optional_result<T>(
+    code: ffi::GhosttyResult,
+    v: MaybeUninit<T>,
+) -> Result<Option<T>> {
+    match code {
+        // SAFETY: Value should be initialized after successful call.
+        ffi::GhosttyResult_GHOSTTY_SUCCESS => Ok(Some(unsafe { v.assume_init() })),
+        ffi::GhosttyResult_GHOSTTY_OUT_OF_MEMORY => Err(Error::OutOfMemory),
+        ffi::GhosttyResult_GHOSTTY_OUT_OF_SPACE => Err(Error::OutOfSpace { required: 0 }),
+        ffi::GhosttyResult_GHOSTTY_NO_VALUE => Ok(None),
         _ => Err(Error::InvalidValue),
     }
 }

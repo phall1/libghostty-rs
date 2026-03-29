@@ -148,43 +148,77 @@ use crate::{
 /// // Iterate rows via the row iterator. For each dirty row, iterate its
 /// // cells, read codepoints/graphemes and styles, and emit ANSI-colored
 /// // output as a simple "renderer".
-/// # use libghostty_vt::{Terminal, TerminalOptions, RenderState};
+/// use libghostty_vt::{Terminal, TerminalOptions, RenderState};
+/// use libghostty_vt::style::Underline;
+///
+/// # fn main() -> Result<(), Box<dyn std::error::Error>> {
 /// # let terminal = Terminal::new(TerminalOptions {
 /// #     cols: 80,
 /// #     rows: 25,
 /// #     max_scrollback: 10000,
 /// # }).unwrap();
-/// # let mut render_state = RenderState::new().unwrap();
+/// # let mut render_state = RenderState::new()?;
 /// use libghostty_vt::render::{RowIterator, CellIterator};
 ///
 /// // During setup:
-/// let mut rows = RowIterator::new().unwrap();
-/// let mut cells = CellIterator::new().unwrap();
+/// let mut rows = RowIterator::new()?;
+/// let mut cells = CellIterator::new()?;
 ///
 /// // On each frame:
-/// let snapshot = render_state.update(&terminal).unwrap();
-/// let mut row_iter = rows.update(&snapshot);
+/// let snapshot = render_state.update(&terminal)?;
+/// let colors = snapshot.colors()?;
+///
+/// let mut row_iter = rows.update(&snapshot)?;
 /// let mut row_index = 0;
 ///
 /// while let Some(row) = row_iter.next() {
 ///     // Check per-row dirty state; a real renderer would skip clean rows.
 ///     print!(
 ///         "Row {row_index} [{}]",
-///         if row.dirty().unwrap() { "dirty" } else { "clean" }
+///         if row.dirty()? { "dirty" } else { "clean" }
 ///     );
 ///
 ///     // Get cells for this row (reuses the same cells handle).
-///     let mut cell_iter = cells.update(&row);
+///     let mut cell_iter = cells.update(&row)?;
 ///     while let Some(cell) = cell_iter.next() {
-///         let graphemes = cell.graphemes().unwrap();
-///         println!("{:?}", &graphemes);
+///         let graphemes = cell.graphemes()?;
+///
+///         if graphemes.is_empty() {
+///             print!(" ");
+///             continue;
+///         }
+///
+///         // Resolve foreground color for this cell.
+///         let fg = cell.fg_color()?.unwrap_or(colors.foreground);
+///         // Emit ANSI true-color escape for the foreground.
+///         print!("\x1b[38;2;{};{};{}m", fg.r, fg.g, fg.b);
+///
+///         // Read the style for this cell. Returns the default style for
+///         // cells that have no explicit styling.
+///         let style = cell.style()?;
+///         if style.bold {
+///             print!("\x1b[1m");
+///         }
+///         if style.underline != Underline::None {
+///             print!("\x1b[4m");
+///         }
+///
+///         for grapheme in graphemes {
+///             print!("{}", grapheme.escape_default());
+///         }
+///         print!("\x1b[0m"); // Reset style after each cell.
 ///     }
+///     println!();
+///
+///     // Clear per-row dirty flag after "rendering" it.
+///     row.set_dirty(false);
+///
 ///     row_index += 1;
-///     println!()
 /// }
+/// # Ok(())}
 /// ```
 #[derive(Debug)]
-pub struct RenderState<'alloc>(Object<'alloc, ffi::GhosttyRenderState>);
+pub struct RenderState<'alloc>(Object<'alloc, ffi::GhosttyRenderStateImpl>);
 
 /// A snapshot of the render state after an update.
 ///
@@ -201,7 +235,7 @@ pub struct Snapshot<'alloc, 's>(&'s mut RenderState<'alloc>);
 /// the render state in order to function, as most data is only accessible
 /// per [iteration](RowIteration).
 #[derive(Debug)]
-pub struct RowIterator<'alloc>(Object<'alloc, ffi::GhosttyRenderStateRowIterator>);
+pub struct RowIterator<'alloc>(Object<'alloc, ffi::GhosttyRenderStateRowIteratorImpl>);
 
 /// An active iteration over the rows in the render state.
 ///
@@ -225,7 +259,7 @@ pub struct RowIteration<'alloc, 's> {
 /// [row](RowIteration) in order to function, as most data is only
 /// accessible per [iteration](CellIteration).
 #[derive(Debug)]
-pub struct CellIterator<'alloc>(Object<'alloc, ffi::GhosttyRenderStateRowCells>);
+pub struct CellIterator<'alloc>(Object<'alloc, ffi::GhosttyRenderStateRowCellsImpl>);
 
 /// An active iteration over the cells on a given row
 /// within the render state.
@@ -261,7 +295,7 @@ impl<'alloc> RenderState<'alloc> {
     }
 
     unsafe fn new_inner(alloc: *const ffi::GhosttyAllocator) -> Result<Self> {
-        let mut raw: ffi::GhosttyRenderState_ptr = std::ptr::null_mut();
+        let mut raw: ffi::GhosttyRenderState = std::ptr::null_mut();
         let result = unsafe { ffi::ghostty_render_state_new(alloc, &raw mut raw) };
         from_result(result)?;
         Ok(Self(Object::new(raw)?))
@@ -432,7 +466,7 @@ impl<'alloc> RowIterator<'alloc> {
     }
 
     unsafe fn new_inner(alloc: *const ffi::GhosttyAllocator) -> Result<Self> {
-        let mut raw: ffi::GhosttyRenderStateRowIterator_ptr = std::ptr::null_mut();
+        let mut raw: ffi::GhosttyRenderStateRowIterator = std::ptr::null_mut();
         let result = unsafe { ffi::ghostty_render_state_row_iterator_new(alloc, &raw mut raw) };
         from_result(result)?;
         Ok(Self(Object::new(raw)?))
@@ -542,7 +576,7 @@ impl<'alloc> CellIterator<'alloc> {
     }
 
     unsafe fn new_inner(alloc: *const ffi::GhosttyAllocator) -> Result<Self> {
-        let mut raw: ffi::GhosttyRenderStateRowCells_ptr = std::ptr::null_mut();
+        let mut raw: ffi::GhosttyRenderStateRowCells = std::ptr::null_mut();
         let result = unsafe { ffi::ghostty_render_state_row_cells_new(alloc, &raw mut raw) };
         from_result(result)?;
         Ok(Self(Object::new(raw)?))

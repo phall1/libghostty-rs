@@ -1,9 +1,7 @@
 //! Handling SGR (Select Graphic Rendition) escape sequences.
 
-use std::{marker::PhantomData, ptr::NonNull};
-
 use crate::{
-    alloc::Allocator,
+    alloc::{Allocator, Object},
     error::{Error, Result, from_result},
     ffi,
     style::{PaletteIndex, RgbColor, Underline},
@@ -38,10 +36,7 @@ use crate::{
 /// }
 /// ```
 #[derive(Debug)]
-pub struct Parser<'alloc> {
-    ptr: NonNull<ffi::GhosttySgrParser>,
-    _phan: PhantomData<&'alloc ffi::GhosttyAllocator>,
-}
+pub struct Parser<'alloc>(Object<'alloc, ffi::GhosttySgrParserImpl>);
 
 impl<'alloc> Parser<'alloc> {
     /// Create a new SGR parser.
@@ -60,14 +55,10 @@ impl<'alloc> Parser<'alloc> {
     }
 
     unsafe fn new_inner(alloc: *const ffi::GhosttyAllocator) -> Result<Self> {
-        let mut raw: ffi::GhosttySgrParser_ptr = std::ptr::null_mut();
+        let mut raw: ffi::GhosttySgrParser = std::ptr::null_mut();
         let result = unsafe { ffi::ghostty_sgr_new(alloc, &raw mut raw) };
         from_result(result)?;
-        let ptr = NonNull::new(raw).ok_or(Error::OutOfMemory)?;
-        Ok(Self {
-            ptr,
-            _phan: PhantomData,
-        })
+        Ok(Self(Object::new(raw)?))
     }
 
     /// Set SGR parameters for parsing.
@@ -89,18 +80,18 @@ impl<'alloc> Parser<'alloc> {
     ///
     /// **Panics** if `separators` is not `None` and is not the same length as `params`.
     pub fn set_params(&mut self, params: &[u16], separators: Option<&[u8]>) -> Result<()> {
-        let sep_ptr = match separators {
+        let sep = match separators {
             Some(seps) => {
                 assert!(
                     seps.len() == params.len(),
                     "separators length must equal params length"
                 );
-                seps.as_ptr().cast::<std::os::raw::c_char>()
+                seps.as_ptr().cast()
             }
             None => std::ptr::null(),
         };
         let result = unsafe {
-            ffi::ghostty_sgr_set_params(self.ptr.as_ptr(), params.as_ptr(), sep_ptr, params.len())
+            ffi::ghostty_sgr_set_params(self.0.as_raw(), params.as_ptr(), sep, params.len())
         };
         from_result(result)
     }
@@ -119,7 +110,7 @@ impl<'alloc> Parser<'alloc> {
     )]
     pub fn next(&mut self) -> Result<Option<Attribute<'_>>> {
         let mut raw_attr = ffi::GhosttySgrAttribute::default();
-        let has_next = unsafe { ffi::ghostty_sgr_next(self.ptr.as_ptr(), &raw mut raw_attr) };
+        let has_next = unsafe { ffi::ghostty_sgr_next(self.0.as_raw(), &raw mut raw_attr) };
         if has_next {
             // This shouldn't really *ever* fail, so the fact it failed
             // suggests we should stop anyways.
@@ -135,13 +126,13 @@ impl<'alloc> Parser<'alloc> {
     /// After calling this, [`Parser::next`] will start from the beginning of the
     /// parameter list again.
     pub fn reset(&mut self) {
-        unsafe { ffi::ghostty_sgr_reset(self.ptr.as_ptr()) }
+        unsafe { ffi::ghostty_sgr_reset(self.0.as_raw()) }
     }
 }
 
 impl Drop for Parser<'_> {
     fn drop(&mut self) {
-        unsafe { ffi::ghostty_sgr_free(self.ptr.as_ptr()) }
+        unsafe { ffi::ghostty_sgr_free(self.0.as_raw()) }
     }
 }
 

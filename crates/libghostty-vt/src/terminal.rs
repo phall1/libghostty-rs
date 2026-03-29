@@ -4,10 +4,10 @@ use std::{marker::PhantomData, mem::MaybeUninit};
 
 use crate::{
     alloc::{Allocator, Object},
-    error::{Error, Result, from_result},
+    error::{Error, Result, from_optional_result, from_result},
     ffi, key,
     screen::GridRef,
-    style,
+    style::{self, RgbColor},
 };
 
 #[doc(inline)]
@@ -107,7 +107,7 @@ pub use ffi::GhosttySizeReportSize as SizeReportSize;
 /// ```
 #[derive(Debug)]
 pub struct Terminal<'alloc: 'cb, 'cb> {
-    pub(crate) inner: Object<'alloc, ffi::GhosttyTerminal>,
+    pub(crate) inner: Object<'alloc, ffi::GhosttyTerminalImpl>,
     vtable: VTable<'alloc, 'cb>,
 }
 
@@ -152,7 +152,7 @@ impl<'alloc: 'cb, 'cb> Terminal<'alloc, 'cb> {
     }
 
     unsafe fn new_inner(alloc: *const ffi::GhosttyAllocator, opts: Options) -> Result<Self> {
-        let mut raw: ffi::GhosttyTerminal_ptr = std::ptr::null_mut();
+        let mut raw: ffi::GhosttyTerminal = std::ptr::null_mut();
         let result = unsafe { ffi::ghostty_terminal_new(alloc, &raw mut raw, opts.into()) };
         from_result(result)?;
         Ok(Self {
@@ -275,11 +275,27 @@ impl<'alloc: 'cb, 'cb> Terminal<'alloc, 'cb> {
         // SAFETY: Value should be initialized after successful call.
         Ok(unsafe { value.assume_init() })
     }
-
+    fn get_optional<T>(&self, tag: ffi::GhosttyTerminalData) -> Result<Option<T>> {
+        let mut value = MaybeUninit::<T>::zeroed();
+        let result = unsafe {
+            ffi::ghostty_terminal_get(self.inner.as_raw(), tag, value.as_mut_ptr().cast())
+        };
+        from_optional_result(result, value)
+    }
     fn set<T>(&self, tag: ffi::GhosttyTerminalOption, v: &T) -> Result<()> {
         let result = unsafe {
             ffi::ghostty_terminal_set(self.inner.as_raw(), tag, std::ptr::from_ref(v).cast())
         };
+        from_result(result)
+    }
+    fn set_optional<T>(&self, tag: ffi::GhosttyTerminalOption, v: Option<&T>) -> Result<()> {
+        let ptr = if let Some(v) = v {
+            std::ptr::from_ref(v)
+        } else {
+            std::ptr::null()
+        };
+
+        let result = unsafe { ffi::ghostty_terminal_set(self.inner.as_raw(), tag, ptr.cast()) };
         from_result(result)
     }
 
@@ -375,6 +391,94 @@ impl<'alloc: 'cb, 'cb> Terminal<'alloc, 'cb> {
     ///  The number of scrollback rows (total rows minus viewport rows).
     pub fn scrollback_rows(&self) -> Result<usize> {
         self.get(ffi::GhosttyTerminalData_GHOSTTY_TERMINAL_DATA_SCROLLBACK_ROWS)
+    }
+
+    /// The effective foreground color (override or default).
+    pub fn fg_color(&self) -> Result<Option<RgbColor>> {
+        self.get_optional::<ffi::GhosttyColorRgb>(
+            ffi::GhosttyTerminalData_GHOSTTY_TERMINAL_DATA_COLOR_FOREGROUND,
+        )
+        .map(|v| v.map(Into::into))
+    }
+    /// The default foreground color (ignoring any OSC override).
+    pub fn default_fg_color(&self) -> Result<Option<RgbColor>> {
+        self.get_optional::<ffi::GhosttyColorRgb>(
+            ffi::GhosttyTerminalData_GHOSTTY_TERMINAL_DATA_COLOR_FOREGROUND_DEFAULT,
+        )
+        .map(|v| v.map(Into::into))
+    }
+    /// Set the default foreground color.
+    pub fn set_default_fg_color(&self, v: Option<RgbColor>) -> Result<()> {
+        self.set_optional(
+            ffi::GhosttyTerminalOption_GHOSTTY_TERMINAL_OPT_COLOR_FOREGROUND,
+            v.map(ffi::GhosttyColorRgb::from).as_ref(),
+        )
+    }
+
+    /// The effective background color (override or default).
+    pub fn bg_color(&self) -> Result<Option<RgbColor>> {
+        self.get_optional::<ffi::GhosttyColorRgb>(
+            ffi::GhosttyTerminalData_GHOSTTY_TERMINAL_DATA_COLOR_BACKGROUND,
+        )
+        .map(|v| v.map(Into::into))
+    }
+    /// The default background color (ignoring any OSC override).
+    pub fn default_bg_color(&self) -> Result<Option<RgbColor>> {
+        self.get_optional::<ffi::GhosttyColorRgb>(
+            ffi::GhosttyTerminalData_GHOSTTY_TERMINAL_DATA_COLOR_BACKGROUND_DEFAULT,
+        )
+        .map(|v| v.map(Into::into))
+    }
+    /// Set the default background color.
+    pub fn set_default_bg_color(&self, v: Option<RgbColor>) -> Result<()> {
+        self.set_optional(
+            ffi::GhosttyTerminalOption_GHOSTTY_TERMINAL_OPT_COLOR_BACKGROUND,
+            v.map(ffi::GhosttyColorRgb::from).as_ref(),
+        )
+    }
+
+    /// The effective cursor color (override or default).
+    pub fn cursor_color(&self) -> Result<Option<RgbColor>> {
+        self.get_optional::<ffi::GhosttyColorRgb>(
+            ffi::GhosttyTerminalData_GHOSTTY_TERMINAL_DATA_COLOR_CURSOR,
+        )
+        .map(|v| v.map(Into::into))
+    }
+    /// The default cursor color (ignoring any OSC override).
+    pub fn default_cursor_color(&self) -> Result<Option<RgbColor>> {
+        self.get_optional::<ffi::GhosttyColorRgb>(
+            ffi::GhosttyTerminalData_GHOSTTY_TERMINAL_DATA_COLOR_CURSOR_DEFAULT,
+        )
+        .map(|v| v.map(Into::into))
+    }
+    /// Set the default cursor color.
+    pub fn set_default_cursor_color(&self, v: Option<RgbColor>) -> Result<()> {
+        self.set_optional(
+            ffi::GhosttyTerminalOption_GHOSTTY_TERMINAL_OPT_COLOR_CURSOR,
+            v.map(ffi::GhosttyColorRgb::from).as_ref(),
+        )
+    }
+
+    /// The current 256-color palette.
+    pub fn color_palette(&self) -> Result<[RgbColor; 256]> {
+        self.get::<[ffi::GhosttyColorRgb; 256]>(
+            ffi::GhosttyTerminalData_GHOSTTY_TERMINAL_DATA_COLOR_PALETTE,
+        )
+        .map(|v| v.map(Into::into))
+    }
+    /// The default 256-color palette (ignoring any OSC overrides).
+    pub fn default_color_palette(&self) -> Result<[RgbColor; 256]> {
+        self.get::<[ffi::GhosttyColorRgb; 256]>(
+            ffi::GhosttyTerminalData_GHOSTTY_TERMINAL_DATA_COLOR_PALETTE_DEFAULT,
+        )
+        .map(|v| v.map(Into::into))
+    }
+    /// Set the default 256-color palette.
+    pub fn set_default_color_palette(&self, v: Option<[RgbColor; 256]>) -> Result<()> {
+        self.set_optional(
+            ffi::GhosttyTerminalOption_GHOSTTY_TERMINAL_OPT_COLOR_PALETTE,
+            v.map(|v| v.map(ffi::GhosttyColorRgb::from)).as_ref(),
+        )
     }
 }
 
@@ -640,7 +744,8 @@ impl From<PrimaryDeviceAttributes> for ffi::GhosttyDeviceAttributesPrimary {
 pub struct ConformanceLevel(pub u16);
 
 impl ConformanceLevel {
-    #![allow(clippy::cast_possible_truncation, reason = "bindgen ain't perfect")]
+    #![expect(clippy::cast_possible_truncation, reason = "bindgen ain't perfect")]
+    #![expect(clippy::doc_markdown, reason = "false positive")]
     #![expect(missing_docs, reason = "self-explanatory")]
     pub const VT100: Self = Self(ffi::GHOSTTY_DA_CONFORMANCE_VT100 as u16);
     pub const VT101: Self = Self(ffi::GHOSTTY_DA_CONFORMANCE_VT101 as u16);
@@ -813,7 +918,7 @@ macro_rules! handlers {
             $(#[$fmeta])*
             $vis fn $name(&mut self, f: impl $fnty<'alloc, 'cb>) -> $crate::error::Result<&mut Self> {
                 unsafe extern "C" fn callback(
-                    t: *mut $crate::ffi::GhosttyTerminal,
+                    t: $crate::ffi::GhosttyTerminal,
                     ud: *mut std::ffi::c_void,
                     $($rfname: $rfty),*
                 ) $(-> $rawrty)? {
@@ -845,7 +950,7 @@ macro_rules! handlers {
                 // and not a function *item* (which is a ZST whose address is meaningless).
                 // :)
                 let callback_ptr: unsafe extern "C" fn(
-                    *mut $crate::ffi::GhosttyTerminal,
+                    $crate::ffi::GhosttyTerminal,
                     *mut ::std::ffi::c_void,
                     $($rfty),*
                 ) $(-> $rawrty)? = callback;

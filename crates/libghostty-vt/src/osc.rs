@@ -15,7 +15,7 @@ use crate::{
 /// This interface makes it easy to integrate into most environments and avoids
 /// over-allocating buffers.
 #[derive(Debug)]
-pub struct Parser<'alloc>(Object<'alloc, ffi::GhosttyOscParser>);
+pub struct Parser<'alloc>(Object<'alloc, ffi::GhosttyOscParserImpl>);
 
 impl<'alloc> Parser<'alloc> {
     /// Create a new OSC parser.
@@ -34,7 +34,7 @@ impl<'alloc> Parser<'alloc> {
     }
 
     unsafe fn new_inner(alloc: *const ffi::GhosttyAllocator) -> Result<Self> {
-        let mut raw: ffi::GhosttyOscParser_ptr = std::ptr::null_mut();
+        let mut raw: ffi::GhosttyOscParser = std::ptr::null_mut();
         let result = unsafe { ffi::ghostty_osc_new(alloc, &raw mut raw) };
         from_result(result)?;
         Ok(Self(Object::new(raw)?))
@@ -97,7 +97,7 @@ impl Drop for Parser<'_> {
 /// The command can be queried for its type and associated data.
 #[derive(Debug)]
 pub struct Command<'p, 'alloc> {
-    inner: Object<'alloc, ffi::GhosttyOscCommand>,
+    inner: Object<'alloc, ffi::GhosttyOscCommandImpl>,
     _parser: PhantomData<&'p Parser<'alloc>>,
 }
 

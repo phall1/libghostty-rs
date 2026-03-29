@@ -25,7 +25,7 @@ use crate::{
 
 /// Key encoder that converts key events into terminal escape sequences.
 #[derive(Debug)]
-pub struct Encoder<'alloc>(Object<'alloc, ffi::GhosttyKeyEncoder>);
+pub struct Encoder<'alloc>(Object<'alloc, ffi::GhosttyKeyEncoderImpl>);
 
 impl<'alloc> Encoder<'alloc> {
     /// Create a new key encoder instance.
@@ -44,7 +44,7 @@ impl<'alloc> Encoder<'alloc> {
     }
 
     unsafe fn new_inner(alloc: *const ffi::GhosttyAllocator) -> Result<Self> {
-        let mut raw: ffi::GhosttyKeyEncoder_ptr = std::ptr::null_mut();
+        let mut raw: ffi::GhosttyKeyEncoder = std::ptr::null_mut();
         let result = unsafe { ffi::ghostty_key_encoder_new(alloc, &raw mut raw) };
         from_result(result)?;
         Ok(Self(Object::new(raw)?))
@@ -224,7 +224,7 @@ impl Drop for Encoder<'_> {
 /// modifiers, and generated text.
 #[derive(Debug)]
 pub struct Event<'alloc> {
-    inner: Object<'alloc, ffi::GhosttyKeyEvent>,
+    inner: Object<'alloc, ffi::GhosttyKeyEventImpl>,
     text: Option<String>,
 }
 
@@ -245,7 +245,7 @@ impl<'alloc> Event<'alloc> {
     }
 
     unsafe fn new_inner(alloc: *const ffi::GhosttyAllocator) -> Result<Self> {
-        let mut raw: ffi::GhosttyKeyEvent_ptr = std::ptr::null_mut();
+        let mut raw: ffi::GhosttyKeyEvent = std::ptr::null_mut();
         let result = unsafe { ffi::ghostty_key_event_new(alloc, &raw mut raw) };
         from_result(result)?;
         Ok(Self {
@@ -350,7 +350,7 @@ impl<'alloc> Event<'alloc> {
     /// Set the unshifted Unicode codepoint.
     pub fn set_unshifted_codepoint(&mut self, codepoint: char) -> &mut Self {
         unsafe {
-            ffi::ghostty_key_event_set_unshifted_codepoint(self.inner.as_raw(), codepoint.into())
+            ffi::ghostty_key_event_set_unshifted_codepoint(self.inner.as_raw(), codepoint.into());
         }
         self
     }

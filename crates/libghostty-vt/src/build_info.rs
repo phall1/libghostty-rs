@@ -51,6 +51,33 @@ pub fn optimize_mode() -> Result<OptimizeMode> {
         .and_then(|v| v.try_into().map_err(|_| Error::InvalidValue))
 }
 
+/// The full version string (e.g. "1.2.3" or "1.2.3-dev+abcdef").
+pub fn version_string() -> Result<&'static str> {
+    build_info::<ffi::GhosttyString>(ffi::GhosttyBuildInfo_GHOSTTY_BUILD_INFO_VERSION_STRING)
+        // SAFETY: API guarantees
+        .map(|s| unsafe { s.to_str() })
+}
+/// The major version number.
+pub fn major_version() -> Result<usize> {
+    build_info(ffi::GhosttyBuildInfo_GHOSTTY_BUILD_INFO_VERSION_MAJOR)
+}
+/// The minor version number.
+pub fn minor_version() -> Result<usize> {
+    build_info(ffi::GhosttyBuildInfo_GHOSTTY_BUILD_INFO_VERSION_MINOR)
+}
+/// The patch version number.
+pub fn patch_version() -> Result<usize> {
+    build_info(ffi::GhosttyBuildInfo_GHOSTTY_BUILD_INFO_VERSION_PATCH)
+}
+/// The build metadata string (e.g. commit hash).
+///
+/// Has zero length if no build metadata is present.
+pub fn build_version() -> Result<&'static str> {
+    build_info::<ffi::GhosttyString>(ffi::GhosttyBuildInfo_GHOSTTY_BUILD_INFO_VERSION_BUILD)
+        // SAFETY: API guarantees
+        .map(|s| unsafe { s.to_str() })
+}
+
 fn build_info<T>(tag: ffi::GhosttyBuildInfo) -> Result<T> {
     let mut value = MaybeUninit::zeroed();
     let result = unsafe { ffi::ghostty_build_info(tag, std::ptr::from_mut(&mut value).cast()) };

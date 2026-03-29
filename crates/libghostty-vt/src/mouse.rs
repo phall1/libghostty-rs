@@ -28,7 +28,7 @@ pub use ffi::GhosttyMousePosition as Position;
 /// Mouse encoder that converts normalized mouse events into
 /// terminal escape sequences.
 #[derive(Debug)]
-pub struct Encoder<'alloc>(Object<'alloc, ffi::GhosttyMouseEncoder>);
+pub struct Encoder<'alloc>(Object<'alloc, ffi::GhosttyMouseEncoderImpl>);
 
 impl<'alloc> Encoder<'alloc> {
     /// Create a new mouse encoder instance.
@@ -47,7 +47,7 @@ impl<'alloc> Encoder<'alloc> {
     }
 
     unsafe fn new_inner(alloc: *const ffi::GhosttyAllocator) -> Result<Self> {
-        let mut raw: ffi::GhosttyMouseEncoder_ptr = std::ptr::null_mut();
+        let mut raw: ffi::GhosttyMouseEncoder = std::ptr::null_mut();
         let result = unsafe { ffi::ghostty_mouse_encoder_new(alloc, &raw mut raw) };
         from_result(result)?;
         Ok(Self(Object::new(raw)?))
@@ -202,7 +202,7 @@ impl Drop for Encoder<'_> {
 /// Normalized mouse input event containing action, button, modifiers, and
 /// surface-space position.
 #[derive(Debug)]
-pub struct Event<'alloc>(Object<'alloc, ffi::GhosttyMouseEvent>);
+pub struct Event<'alloc>(Object<'alloc, ffi::GhosttyMouseEventImpl>);
 
 impl<'alloc> Event<'alloc> {
     /// Create a new mouse event instance.
@@ -221,7 +221,7 @@ impl<'alloc> Event<'alloc> {
     }
 
     unsafe fn new_inner(alloc: *const ffi::GhosttyAllocator) -> Result<Self> {
-        let mut raw: ffi::GhosttyMouseEvent_ptr = std::ptr::null_mut();
+        let mut raw: ffi::GhosttyMouseEvent = std::ptr::null_mut();
         let result = unsafe { ffi::ghostty_mouse_event_new(alloc, &raw mut raw) };
         from_result(result)?;
         Ok(Self(Object::new(raw)?))
