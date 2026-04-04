@@ -11,6 +11,7 @@ rust-version.workspace = true
 default = ["kitty-graphics"]
 allocator_api = ["dep:allocator-api2"]
 kitty-graphics = ["libghostty-vt-sys/kitty-graphics"]
+link-static = ["libghostty-vt-sys/link-static"]
 png = ["dep:png"]
 
 [dependencies]

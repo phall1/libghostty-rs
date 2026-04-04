@@ -5,6 +5,9 @@ edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
 
+[features]
+link-static = ["libghostty-vt/link-static"]
+
 [dependencies]
 libghostty-vt.workspace = true
 macroquad = "0.4.14"

@@ -56,14 +56,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 Requires [Zig](https://ziglang.org/) 0.15.x on PATH. The ghostty source is fetched automatically at build time (pinned commit in `build.rs`). Set `GHOSTTY_SOURCE_DIR` to use a local checkout instead.
 
+Vendored builds link `libghostty-vt` dynamically by default. Enable the `link-static` feature to link the vendored archive statically instead. Static builds follow upstream Ghostty and still require a `libc++` runtime to be available to the linker.
+
 ```sh
 nix develop
 cargo check
 cargo test -p libghostty-vt-sys
 cargo build -p ghostling_rs
+cargo build -p ghostling_rs --features link-static
 ```
 
 ### Running the example
+
+When you build dynamically, point the dynamic loader at the vendored library.
 
 ```sh
 # Linux
@@ -74,3 +79,5 @@ LD_LIBRARY_PATH=$(dirname $(find target/debug/build/libghostty-vt-sys-*/out -nam
 DYLD_LIBRARY_PATH=$(dirname $(find target/debug/build/libghostty-vt-sys-*/out -name "libghostty-vt*" | head -1)) \
   cargo run -p ghostling_rs
 ```
+
+When you build with `--features link-static`, no extra loader environment is required.

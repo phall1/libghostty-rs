@@ -9,9 +9,13 @@ rust-version.workspace = true
 links = "ghostty-vt"
 build = "build.rs"
 
+[lib]
+doctest = false
+
 [features]
 default = ["vendored"]
 vendored = []
+link-static = []
 bindgen-tool = ["dep:bindgen", "dep:libc", "dep:heck"]
 kitty-graphics = []
 

@@ -67,9 +67,11 @@
           buildInputs =
             [
               pkgs.libclang
+              pkgs.libcxx
               pkgs.openssl
             ]
             ++ pkgs.lib.optionals pkgs.stdenv.isLinux [
+              pkgs.llvmPackages.libunwind
               pkgs.musl
             ]
             ++ pkgs.lib.optionals pkgs.stdenv.isDarwin [
@@ -95,11 +97,13 @@
             zigPkg
             pkgs.clang
             pkgs.libclang
+            pkgs.libcxx
             pkgs.pkg-config
             pkgs.openssl
             pkgs.cmake
             pkgs.ninja
           ] ++ pkgs.lib.optionals pkgs.stdenv.hostPlatform.isLinux [
+            pkgs.llvmPackages.libunwind
             pkgs.libx11
             pkgs.libxcursor
             pkgs.libxrandr

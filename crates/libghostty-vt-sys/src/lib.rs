@@ -47,6 +47,7 @@ impl bindings::String {
 
 /// Canonical list of exported `libghostty-vt` C functions represented by checked-in bindings.
 pub const EXPORTED_API_SYMBOLS: &[&str] = &[
+    "ghostty_alloc",
     "ghostty_build_info",
     "ghostty_cell_get",
     "ghostty_color_rgb_get",
@@ -55,6 +56,7 @@ pub const EXPORTED_API_SYMBOLS: &[&str] = &[
     "ghostty_formatter_format_buf",
     "ghostty_formatter_free",
     "ghostty_formatter_terminal_new",
+    "ghostty_free",
     "ghostty_grid_ref_cell",
     "ghostty_grid_ref_graphemes",
     "ghostty_grid_ref_row",
@@ -105,6 +107,7 @@ pub const EXPORTED_API_SYMBOLS: &[&str] = &[
     "ghostty_osc_new",
     "ghostty_osc_next",
     "ghostty_osc_reset",
+    "ghostty_paste_encode",
     "ghostty_paste_is_safe",
     "ghostty_render_state_colors_get",
     "ghostty_render_state_free",
@@ -144,6 +147,7 @@ pub const EXPORTED_API_SYMBOLS: &[&str] = &[
     "ghostty_terminal_reset",
     "ghostty_terminal_resize",
     "ghostty_terminal_scroll_viewport",
+    "ghostty_terminal_set",
     "ghostty_terminal_vt_write",
 ];
 

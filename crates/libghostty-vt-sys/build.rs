@@ -23,6 +23,7 @@ fn main() {
     let out_dir = PathBuf::from(env::var("OUT_DIR").expect("OUT_DIR must be set"));
     let target = env::var("TARGET").expect("TARGET must be set");
     let host = env::var("HOST").expect("HOST must be set");
+    let link_static = env::var_os("CARGO_FEATURE_LINK_STATIC").is_some();
 
     // Locate ghostty source: env override > fetch into OUT_DIR.
     let ghostty_dir = match env::var("GHOSTTY_SOURCE_DIR") {
@@ -60,17 +61,13 @@ fn main() {
 
     let lib_dir = install_prefix.join("lib");
     let include_dir = install_prefix.join("include");
-
-    let lib_name = if target.contains("darwin") {
-        "libghostty-vt.0.1.0.dylib"
-    } else {
-        "libghostty-vt.so.0.1.0"
-    };
+    let library_path = expected_library_path(&lib_dir, &target, link_static);
 
     assert!(
-        lib_dir.join(lib_name).exists(),
-        "expected shared library at {}",
-        lib_dir.join(lib_name).display()
+        library_path.exists(),
+        "expected {} library at {}",
+        if link_static { "static" } else { "shared" },
+        library_path.display()
     );
     assert!(
         include_dir.join("ghostty").join("vt.h").exists(),
@@ -79,8 +76,45 @@ fn main() {
     );
 
     println!("cargo:rustc-link-search=native={}", lib_dir.display());
-    println!("cargo:rustc-link-lib=dylib=ghostty-vt");
+    if link_static {
+        // The static archive contains multiple internally referenced object
+        // files, so whole-archive keeps Rust's dead-strip pass from dropping
+        // pieces that libghostty-vt still needs at runtime.
+        println!("cargo:rustc-link-lib=static:+whole-archive=ghostty-vt");
+
+        if let Some(cpp_runtime) = cpp_runtime_lib(&target) {
+            println!("cargo:rustc-link-lib=dylib={cpp_runtime}");
+        }
+    } else {
+        println!("cargo:rustc-link-lib=dylib=ghostty-vt");
+    }
     println!("cargo:include={}", include_dir.display());
+}
+
+fn expected_library_path(lib_dir: &Path, target: &str, link_static: bool) -> PathBuf {
+    if link_static {
+        if target.contains("windows") {
+            lib_dir.join("ghostty-vt-static.lib")
+        } else {
+            lib_dir.join("libghostty-vt.a")
+        }
+    } else if target.contains("darwin") {
+        lib_dir.join("libghostty-vt.0.1.0.dylib")
+    } else if target.contains("windows") {
+        lib_dir.join("ghostty-vt.dll")
+    } else {
+        lib_dir.join("libghostty-vt.so.0.1.0")
+    }
+}
+
+fn cpp_runtime_lib(target: &str) -> Option<&'static str> {
+    if target.contains("darwin") || target.contains("linux") {
+        // Upstream's pkg-config metadata uses libc++ for static consumers
+        // because Zig builds the bundled C++ code against LLVM's runtime.
+        Some("c++")
+    } else {
+        None
+    }
 }
 
 /// Clone ghostty at the pinned commit into OUT_DIR/ghostty-src.
