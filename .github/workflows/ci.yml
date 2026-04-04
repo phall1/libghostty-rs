@@ -31,5 +31,11 @@ jobs:
 
       - uses: DeterminateSystems/magic-nix-cache-action@main
 
-      - name: Build
-        run: nix develop -c cargo build
+      - name: Test libghostty-vt-sys
+        run: nix develop -c cargo test -p libghostty-vt-sys
+
+      - name: Build ghostling_rs with dynamic linking
+        run: nix develop -c cargo build -p ghostling_rs
+
+      - name: Build ghostling_rs with static linking
+        run: nix develop -c cargo build -p ghostling_rs --features link-static
