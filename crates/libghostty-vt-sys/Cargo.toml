@@ -13,6 +13,7 @@ build = "build.rs"
 default = ["vendored"]
 vendored = []
 bindgen-tool = ["dep:bindgen", "dep:libc", "dep:heck"]
+kitty-images = []
 
 [dependencies]
 bindgen = {version = "0.72.1", optional = true}

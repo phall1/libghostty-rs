@@ -49,6 +49,7 @@ pub mod render;
 pub mod screen;
 pub mod sgr;
 pub mod style;
+pub mod sys;
 pub mod terminal;
 
 #[doc(inline)]

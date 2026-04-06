@@ -7,12 +7,12 @@ use crate::{
     error::{Error, Result, from_optional_result, from_result},
     ffi::{self, TerminalData as Data, TerminalOption as Opt},
     key,
-    screen::GridRef,
+    screen::{GridRef, Screen},
     style::{self, RgbColor},
 };
 
 #[doc(inline)]
-pub use ffi::SizeReportSize;
+pub use ffi::{SizeReportSize, TerminalScrollbar as Scrollbar};
 
 /// Complete terminal emulator state and rendering.
 ///
@@ -144,8 +144,8 @@ impl<'alloc: 'cb, 'cb> Terminal<'alloc, 'cb> {
     ///
     /// See the [crate-level documentation](crate#memory-management-and-lifetimes)
     /// regarding custom memory management and lifetimes.
-    pub fn new_with_alloc<'ctx: 'alloc, Ctx>(
-        alloc: &'alloc Allocator<'ctx, Ctx>,
+    pub fn new_with_alloc<'ctx: 'alloc>(
+        alloc: &'alloc Allocator<'ctx>,
         opts: Options,
     ) -> Result<Self> {
         // SAFETY: Borrow checking should forbid invalid allocators
@@ -283,13 +283,13 @@ impl<'alloc: 'cb, 'cb> Terminal<'alloc, 'cb> {
         };
         from_optional_result(result, value)
     }
-    fn set<T>(&self, tag: ffi::TerminalOption::Type, v: &T) -> Result<()> {
+    fn set<T>(&mut self, tag: ffi::TerminalOption::Type, v: &T) -> Result<()> {
         let result = unsafe {
             ffi::ghostty_terminal_set(self.inner.as_raw(), tag, std::ptr::from_ref(v).cast())
         };
         from_result(result)
     }
-    fn set_optional<T>(&self, tag: ffi::TerminalOption::Type, v: Option<&T>) -> Result<()> {
+    fn set_optional<T>(&mut self, tag: ffi::TerminalOption::Type, v: Option<&T>) -> Result<()> {
         let ptr = if let Some(v) = v {
             std::ptr::from_ref(v)
         } else {
@@ -342,11 +342,11 @@ impl<'alloc: 'cb, 'cb> Terminal<'alloc, 'cb> {
     /// This may be expensive to calculate depending on where the viewport is
     /// (arbitrary pins are expensive). The caller should take care to only call
     /// this as needed and not too frequently.
-    pub fn scrollbar(&self) -> Result<ffi::TerminalScrollbar> {
+    pub fn scrollbar(&self) -> Result<Scrollbar> {
         self.get(Data::SCROLLBAR)
     }
     /// Get the currently active screen.
-    pub fn active_screen(&self) -> Result<ffi::TerminalScreen::Type> {
+    pub fn active_screen(&self) -> Result<Screen> {
         self.get(Data::ACTIVE_SCREEN)
     }
     /// Get whether any mouse tracking mode is active.
@@ -401,7 +401,7 @@ impl<'alloc: 'cb, 'cb> Terminal<'alloc, 'cb> {
             .map(|v| v.map(Into::into))
     }
     /// Set the default foreground color.
-    pub fn set_default_fg_color(&self, v: Option<RgbColor>) -> Result<()> {
+    pub fn set_default_fg_color(&mut self, v: Option<RgbColor>) -> Result<()> {
         self.set_optional(Opt::COLOR_FOREGROUND, v.map(ffi::ColorRgb::from).as_ref())
     }
 
@@ -416,7 +416,7 @@ impl<'alloc: 'cb, 'cb> Terminal<'alloc, 'cb> {
             .map(|v| v.map(Into::into))
     }
     /// Set the default background color.
-    pub fn set_default_bg_color(&self, v: Option<RgbColor>) -> Result<()> {
+    pub fn set_default_bg_color(&mut self, v: Option<RgbColor>) -> Result<()> {
         self.set_optional(Opt::COLOR_BACKGROUND, v.map(ffi::ColorRgb::from).as_ref())
     }
 
@@ -431,7 +431,7 @@ impl<'alloc: 'cb, 'cb> Terminal<'alloc, 'cb> {
             .map(|v| v.map(Into::into))
     }
     /// Set the default cursor color.
-    pub fn set_default_cursor_color(&self, v: Option<RgbColor>) -> Result<()> {
+    pub fn set_default_cursor_color(&mut self, v: Option<RgbColor>) -> Result<()> {
         self.set_optional(Opt::COLOR_CURSOR, v.map(ffi::ColorRgb::from).as_ref())
     }
 
@@ -446,11 +446,62 @@ impl<'alloc: 'cb, 'cb> Terminal<'alloc, 'cb> {
             .map(|v| v.map(Into::into))
     }
     /// Set the default 256-color palette.
-    pub fn set_default_color_palette(&self, v: Option<[RgbColor; 256]>) -> Result<()> {
+    pub fn set_default_color_palette(&mut self, v: Option<[RgbColor; 256]>) -> Result<()> {
         self.set_optional(
             Opt::COLOR_PALETTE,
             v.map(|v| v.map(ffi::ColorRgb::from)).as_ref(),
         )
+    }
+}
+
+#[cfg(feature = "kitty-images")]
+impl Terminal<'_, '_> {
+    /// The Kitty image storage limit in bytes for the active screen.
+    ///
+    /// A value of zero means the Kitty graphics protocol is disabled.
+    pub fn kitty_image_storage_limit(&self) -> Result<u64> {
+        self.get(Data::KITTY_IMAGE_STORAGE_LIMIT)
+    }
+    /// Whether the file medium is enabled for Kitty image loading on the
+    /// active screen.
+    pub fn is_kitty_image_from_file_allowed(&self) -> Result<()> {
+        self.get(Data::KITTY_IMAGE_MEDIUM_FILE)
+    }
+    /// Whether the temporary file medium is enabled for Kitty image loading
+    /// on the active screen.
+    pub fn is_kitty_image_from_temp_file_allowed(&self) -> Result<()> {
+        self.get(Data::KITTY_IMAGE_MEDIUM_TEMP_FILE)
+    }
+    /// Whether the shared memory medium is enabled for Kitty image loading
+    /// on the active screen.
+    pub fn is_kitty_image_from_shared_mem_allowed(&self) -> Result<bool> {
+        self.get(Data::KITTY_IMAGE_MEDIUM_SHARED_MEM)
+    }
+    /// Set the Kitty image storage limit in bytes.
+    ///
+    /// Applied to all initialized screens (primary and alternate).
+    /// A value of zero disables the Kitty graphics protocol entirely,
+    /// deleting all stored images and placements.
+    pub fn set_kitty_image_storage_limit(&mut self, limit: u64) -> Result<()> {
+        self.set(Opt::KITTY_IMAGE_STORAGE_LIMIT, &limit)
+    }
+    /// Enable or disable Kitty image loading via the file medium.
+    ///
+    /// Has no effect when Kitty graphics are disabled at build time.
+    pub fn set_kitty_image_from_file_allowed(&mut self, allowed: bool) -> Result<()> {
+        self.set(Opt::KITTY_IMAGE_MEDIUM_FILE, &allowed)
+    }
+    /// Enable or disable Kitty image loading via the temporary file medium.
+    ///
+    /// Has no effect when Kitty graphics are disabled at build time.
+    pub fn set_kitty_image_from_temp_file_allowed(&mut self, allowed: bool) -> Result<()> {
+        self.set(Opt::KITTY_IMAGE_MEDIUM_TEMP_FILE, &allowed)
+    }
+    /// Enable or disable Kitty image loading via the shared memory medium.
+    ///
+    /// Has no effect when Kitty graphics are disabled at build time.
+    pub fn set_kitty_image_from_shared_mem_allowed(&mut self, allowed: bool) -> Result<()> {
+        self.set(Opt::KITTY_IMAGE_MEDIUM_SHARED_MEM, &allowed)
     }
 }
 
