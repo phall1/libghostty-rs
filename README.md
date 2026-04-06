@@ -56,7 +56,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 Requires [Zig](https://ziglang.org/) 0.15.x on PATH. The ghostty source is fetched automatically at build time (pinned commit in `build.rs`). Set `GHOSTTY_SOURCE_DIR` to use a local checkout instead.
 
-Vendored builds link `libghostty-vt` dynamically by default. Enable the `link-static` feature to link the vendored archive statically instead. Static builds follow upstream Ghostty and still require a `libc++` runtime to be available to the linker.
+Vendored builds link `libghostty-vt` dynamically by default. Enable the `link-static` feature to link the vendored archive statically instead.
 
 ```sh
 nix develop
@@ -65,6 +65,8 @@ cargo test -p libghostty-vt-sys
 cargo build -p ghostling_rs
 cargo build -p ghostling_rs --features link-static
 ```
+
+Static builds use Ghostty's vendored fat archive. The final link still needs a libc++-compatible toolchain. On Linux GNU targets, a standard `cargo build --features link-static` will usually produce a binary that retains runtime `libc++.so` and `libc++abi.so` dependencies. Using `zig cc` as the final linker is an optional way to avoid those runtime dependencies.
 
 ### Running the example
 
@@ -80,4 +82,4 @@ DYLD_LIBRARY_PATH=$(dirname $(find target/debug/build/libghostty-vt-sys-*/out -n
   cargo run -p ghostling_rs
 ```
 
-When you build with `--features link-static`, no extra loader environment is required.
+When you build statically, no extra loader environment is required. On Linux GNU targets, the produced binary may still depend on `libc++.so` and `libc++abi.so` unless you choose a `zig cc` final-link setup.

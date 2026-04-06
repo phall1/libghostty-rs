@@ -77,10 +77,10 @@ fn main() {
 
     println!("cargo:rustc-link-search=native={}", lib_dir.display());
     if link_static {
-        // The static archive contains multiple internally referenced object
-        // files, so whole-archive keeps Rust's dead-strip pass from dropping
-        // pieces that libghostty-vt still needs at runtime.
-        println!("cargo:rustc-link-lib=static:+whole-archive=ghostty-vt");
+        // Ghostty's static archive is already a fat archive that bundles the
+        // vendored SIMD dependencies, so downstream consumers can link it as a
+        // normal static library.
+        println!("cargo:rustc-link-lib=static=ghostty-vt");
 
         if let Some(cpp_runtime) = cpp_runtime_lib(&target) {
             println!("cargo:rustc-link-lib=dylib={cpp_runtime}");

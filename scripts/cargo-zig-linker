@@ -1,0 +1,28 @@
+#!/bin/sh
+set -eu
+
+if [ "${LIBGHOSTTY_ZIG_CC_LINKER_MODE:-0}" = "1" ]; then
+    exec zig cc "$@"
+fi
+
+script_path=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)/$(basename -- "$0")
+host_target=$(rustc -vV | sed -n 's/^host: //p')
+
+if [ -z "$host_target" ]; then
+    echo "failed to determine rustc host target" >&2
+    exit 1
+fi
+
+case "$host_target" in
+    *-linux-gnu) ;;
+    *)
+        echo "cargo-zig-linker only supports linux-gnu host targets: $host_target" >&2
+        exit 1
+        ;;
+esac
+
+target_var=$(printf '%s' "$host_target" | tr '[:lower:]-' '[:upper:]_')
+export LIBGHOSTTY_ZIG_CC_LINKER_MODE=1
+eval "export CARGO_TARGET_${target_var}_LINKER='${script_path}'"
+
+exec cargo "$@"

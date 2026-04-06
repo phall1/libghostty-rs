@@ -38,4 +38,17 @@ jobs:
         run: nix develop -c cargo build -p ghostling_rs
 
       - name: Build ghostling_rs with static linking
+        if: runner.os != 'Linux'
         run: nix develop -c cargo build -p ghostling_rs --features link-static
+
+      - name: Build ghostling_rs with static linking via zig cc
+        if: runner.os == 'Linux'
+        run: nix develop -c ./scripts/cargo-zig-linker build -p ghostling_rs --features link-static
+
+      - name: Verify Linux static build avoids libc++ runtime deps
+        if: runner.os == 'Linux'
+        run: |
+          nix develop -c sh -c '
+            readelf -d target/debug/ghostling_rs | grep NEEDED
+            ! readelf -d target/debug/ghostling_rs | grep -Eq "libc\+\+|libc\+\+abi"
+          '
