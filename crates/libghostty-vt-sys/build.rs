@@ -15,6 +15,7 @@ fn main() {
     }
 
     println!("cargo:rerun-if-env-changed=LIBGHOSTTY_VT_SYS_NO_VENDOR");
+    println!("cargo:rerun-if-env-changed=LIBGHOSTTY_VT_SYS_OPTIMIZE");
     println!("cargo:rerun-if-env-changed=GHOSTTY_SOURCE_DIR");
     println!("cargo:rerun-if-env-changed=TARGET");
     println!("cargo:rerun-if-env-changed=HOST");
@@ -46,10 +47,13 @@ fn main() {
     // only controls which artifact we tell rustc to link against below.
     let install_prefix = out_dir.join("ghostty-install");
 
+    let optimize = zig_optimize_mode();
+
     let mut build = Command::new("zig");
     build
         .arg("build")
         .arg("-Demit-lib-vt")
+        .arg(format!("-Doptimize={optimize}"))
         .arg("--prefix")
         .arg(&install_prefix)
         .current_dir(&ghostty_dir);
@@ -108,6 +112,36 @@ fn expected_library_path(lib_dir: &Path, target: &str, link_static: bool) -> Pat
         lib_dir.join("ghostty-vt.dll")
     } else {
         lib_dir.join("libghostty-vt.so.0.1.0")
+    }
+}
+
+/// Map Cargo's release profile to a Zig `OptimizeMode`.
+///
+/// `LIBGHOSTTY_VT_SYS_OPTIMIZE` overrides unconditionally when set (accepts
+/// `Debug`, `ReleaseSafe`, `ReleaseFast`, `ReleaseSmall`). Otherwise Cargo's
+/// `PROFILE` drives the default: `debug` -> `Debug`, everything else ->
+/// `ReleaseFast`.
+fn zig_optimize_mode() -> &'static str {
+    const VALID: &[&str] = &["Debug", "ReleaseSafe", "ReleaseFast", "ReleaseSmall"];
+
+    if let Ok(explicit) = env::var("LIBGHOSTTY_VT_SYS_OPTIMIZE") {
+        assert!(
+            VALID.contains(&explicit.as_str()),
+            "LIBGHOSTTY_VT_SYS_OPTIMIZE must be one of {VALID:?} (got '{explicit}')"
+        );
+        return match explicit.as_str() {
+            "Debug" => "Debug",
+            "ReleaseSafe" => "ReleaseSafe",
+            "ReleaseFast" => "ReleaseFast",
+            "ReleaseSmall" => "ReleaseSmall",
+            _ => unreachable!(),
+        };
+    }
+
+    let profile = env::var("PROFILE").expect("PROFILE must be set by Cargo");
+    match profile.as_str() {
+        "debug" => "Debug",
+        _ => "ReleaseFast",
     }
 }
 
