@@ -39,7 +39,10 @@ fn main() {
         Err(_) => fetch_ghostty(&out_dir),
     };
 
-    // Build libghostty-vt via zig.
+    // Build libghostty-vt via zig. The single `-Demit-lib-vt` flag causes
+    // ghostty's build to emit both the shared library (.so/.dylib) and the
+    // static archive (.a) into the install prefix. The `link_static` flag
+    // only controls which artifact we tell rustc to link against below.
     let install_prefix = out_dir.join("ghostty-install");
 
     let mut build = Command::new("zig");
