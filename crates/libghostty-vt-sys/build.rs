@@ -20,12 +20,18 @@ fn main() {
     println!("cargo:rerun-if-env-changed=TARGET");
     println!("cargo:rerun-if-env-changed=HOST");
     println!("cargo:rerun-if-env-changed=CARGO_FEATURE_LINK_STATIC");
+    println!("cargo:rerun-if-env-changed=CARGO_FEATURE_SIMD");
     println!("cargo:rerun-if-changed=crates/libghostty-vt-sys/build.rs");
 
     let out_dir = PathBuf::from(env::var("OUT_DIR").expect("OUT_DIR must be set"));
     let target = env::var("TARGET").expect("TARGET must be set");
     let host = env::var("HOST").expect("HOST must be set");
     let link_static = env::var_os("CARGO_FEATURE_LINK_STATIC").is_some();
+    let profile = env::var("PROFILE").expect("PROFILE must be set by Cargo");
+
+    // SIMD follows zig's own convention: off in debug, on in release.
+    // The `simd` cargo feature (default-on) lets users force it off.
+    let simd = env::var_os("CARGO_FEATURE_SIMD").is_some() && profile != "debug";
 
     // Locate ghostty source: env override > fetch into OUT_DIR.
     let ghostty_dir = match env::var("GHOSTTY_SOURCE_DIR") {
@@ -47,13 +53,14 @@ fn main() {
     // only controls which artifact we tell rustc to link against below.
     let install_prefix = out_dir.join("ghostty-install");
 
-    let optimize = zig_optimize_mode();
+    let optimize = zig_optimize_mode(&profile);
 
     let mut build = Command::new("zig");
     build
         .arg("build")
         .arg("-Demit-lib-vt")
         .arg(format!("-Doptimize={optimize}"))
+        .arg(format!("-Dsimd={simd}"))
         .arg("--prefix")
         .arg(&install_prefix)
         .current_dir(&ghostty_dir);
@@ -121,7 +128,7 @@ fn expected_library_path(lib_dir: &Path, target: &str, link_static: bool) -> Pat
 /// `Debug`, `ReleaseSafe`, `ReleaseFast`, `ReleaseSmall`). Otherwise Cargo's
 /// `PROFILE` drives the default: `debug` -> `Debug`, everything else ->
 /// `ReleaseFast`.
-fn zig_optimize_mode() -> &'static str {
+fn zig_optimize_mode(profile: &str) -> &'static str {
     const VALID: &[&str] = &["Debug", "ReleaseSafe", "ReleaseFast", "ReleaseSmall"];
 
     if let Ok(explicit) = env::var("LIBGHOSTTY_VT_SYS_OPTIMIZE") {
@@ -138,8 +145,7 @@ fn zig_optimize_mode() -> &'static str {
         };
     }
 
-    let profile = env::var("PROFILE").expect("PROFILE must be set by Cargo");
-    match profile.as_str() {
+    match profile {
         "debug" => "Debug",
         _ => "ReleaseFast",
     }

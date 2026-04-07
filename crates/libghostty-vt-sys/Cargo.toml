@@ -13,8 +13,9 @@ build = "build.rs"
 doctest = false
 
 [features]
-default = ["vendored"]
+default = ["vendored", "simd"]
 vendored = []
+simd = []
 link-static = []
 bindgen-tool = ["dep:bindgen", "dep:libc", "dep:heck"]
 kitty-graphics = []

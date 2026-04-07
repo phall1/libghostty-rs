@@ -58,6 +58,13 @@ Requires [Zig](https://ziglang.org/) 0.15.x on PATH. The ghostty source is fetch
 
 Vendored builds link `libghostty-vt` dynamically by default. Enable the `link-static` feature to link the vendored archive statically instead.
 
+SIMD-accelerated code paths (via simdutf) follow zig's convention: off in debug builds, on in release builds. The `simd` cargo feature (default-on) lets users force SIMD off entirely. SIMD requires libc++ at link time; disabling it removes that dependency:
+
+```toml
+[dependencies]
+libghostty-vt = { version = "0.1", default-features = false }
+```
+
 ```sh
 nix develop
 cargo check
@@ -66,7 +73,7 @@ cargo build -p ghostling_rs
 cargo build -p ghostling_rs --features link-static
 ```
 
-Static builds use Ghostty's vendored fat archive. The final link still needs a libc++-compatible toolchain. On Linux GNU targets, a standard `cargo build --features link-static` will usually produce a binary that retains runtime `libc++.so` and `libc++abi.so` dependencies. Using `zig cc` as the final linker is an optional way to avoid those runtime dependencies.
+Static builds use Ghostty's vendored fat archive. With `simd` enabled (the default), the final link still needs a libc++-compatible toolchain. On Linux GNU targets, a standard `cargo build --features link-static` will usually produce a binary that retains runtime `libc++.so` and `libc++abi.so` dependencies. Using `zig cc` as the final linker is an optional way to avoid those runtime dependencies.
 
 ### Running the example
 
@@ -82,4 +89,4 @@ DYLD_LIBRARY_PATH=$(dirname $(find target/debug/build/libghostty-vt-sys-*/out -n
   cargo run -p ghostling_rs
 ```
 
-When you build statically, no extra loader environment is required. On Linux GNU targets, the produced binary may still depend on `libc++.so` and `libc++abi.so` unless you choose a `zig cc` final-link setup.
+When you build statically, no extra loader environment is required. On Linux GNU targets with `simd` enabled, the produced binary may still depend on `libc++.so` and `libc++abi.so` unless you choose a `zig cc` final-link setup or disable the `simd` feature.
