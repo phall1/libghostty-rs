@@ -23,6 +23,6 @@ esac
 
 target_var=$(printf '%s' "$host_target" | tr '[:lower:]-' '[:upper:]_')
 export LIBGHOSTTY_ZIG_CC_LINKER_MODE=1
-eval "export CARGO_TARGET_${target_var}_LINKER='${script_path}'"
+export "CARGO_TARGET_${target_var}_LINKER=${script_path}"
 
 exec cargo "$@"
