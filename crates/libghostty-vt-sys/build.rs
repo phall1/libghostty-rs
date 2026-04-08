@@ -97,7 +97,7 @@ fn main() {
         // normal static library.
         println!("cargo:rustc-link-lib=static=ghostty-vt");
 
-        if let Some(cpp_runtime) = cpp_runtime_lib(&target) {
+        if let Some(cpp_runtime) = cpp_runtime_lib(&target, simd) {
             println!("cargo:rustc-link-lib=dylib={cpp_runtime}");
         }
     } else {
@@ -151,10 +151,11 @@ fn zig_optimize_mode(profile: &str) -> &'static str {
     }
 }
 
-fn cpp_runtime_lib(target: &str) -> Option<&'static str> {
-    if target.contains("darwin") || target.contains("linux") {
+fn cpp_runtime_lib(target: &str, simd: bool) -> Option<&'static str> {
+    if simd && (target.contains("darwin") || target.contains("linux")) {
         // Upstream's pkg-config metadata uses libc++ for static consumers
-        // because Zig builds the bundled C++ code against LLVM's runtime.
+        // because Zig builds the vendored SIMD code against LLVM's runtime.
+        // When SIMD is off, ghostty-vt does not require a C++ runtime.
         Some("c++")
     } else {
         None
