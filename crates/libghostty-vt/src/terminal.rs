@@ -4,7 +4,7 @@ use std::mem::MaybeUninit;
 
 use crate::{
     alloc::{Allocator, Object},
-    error::{Error, Result, from_optional_result, from_result},
+    error::{from_optional_result, from_result, Error, Result},
     ffi::{self, TerminalData as Data, TerminalOption as Opt},
     key,
     screen::{GridRef, Screen},
@@ -109,6 +109,8 @@ pub use ffi::{SizeReportSize, TerminalScrollbar as Scrollbar};
 #[derive(Debug)]
 pub struct Terminal<'alloc: 'cb, 'cb> {
     pub(crate) inner: Object<'alloc, ffi::TerminalImpl>,
+    // Keep callbacks in a heap allocation so C can store a userdata pointer
+    // to the VTable itself. That pointer remains stable even if Terminal moves.
     vtable: Box<VTable<'alloc, 'cb>>,
 }
 
@@ -285,6 +287,16 @@ impl<'alloc: 'cb, 'cb> Terminal<'alloc, 'cb> {
         let result = unsafe {
             ffi::ghostty_terminal_set(self.inner.as_raw(), tag, std::ptr::from_ref(v).cast())
         };
+        from_result(result)
+    }
+    /// Set an option whose ABI expects the pointer value itself, not a pointer
+    /// to Rust storage containing that value.
+    pub(crate) fn set_ptr(
+        &self,
+        tag: ffi::TerminalOption::Type,
+        ptr: *const std::ffi::c_void,
+    ) -> Result<()> {
+        let result = unsafe { ffi::ghostty_terminal_set(self.inner.as_raw(), tag, ptr) };
         from_result(result)
     }
     pub(crate) fn set_optional<T>(
@@ -902,12 +914,16 @@ macro_rules! handlers {
                     ud: *mut std::ffi::c_void,
                     $($rfname: $rfty),*
                 ) $(-> $rawrty)? {
-                    // SAFETY: We own the vtable, so it should never become invalid.
-                    let vtable = unsafe { &mut *ud.cast::<::std::boxed::Box<VTable<'_, '_>>>() };
+                    // SAFETY: USERDATA is set to the boxed VTable pointee before
+                    // the callback is registered. ghostty invokes callbacks
+                    // synchronously during vt_write, so the VTable remains alive
+                    // for the duration of this call.
+                    let vtable = unsafe { &mut *ud.cast::<VTable<'_, '_>>() };
 
                     let obj = $crate::alloc::Object::new(t).expect("received null terminal ptr in callback - this is a bug!");
-                    // IMPORTANT: Do NOT let the destructor run.
-                    let term = ::core::mem::ManuallyDrop::new($crate::terminal::Terminal::<'_, '_> {
+                    // Build a temporary borrowed Terminal view for the callback
+                    // without taking ownership of the underlying ghostty terminal.
+                    let mut term = ::core::mem::ManuallyDrop::new($crate::terminal::Terminal::<'_, '_> {
                         inner: obj,
                         vtable: ::core::default::Default::default(),
                     });
@@ -916,14 +932,23 @@ macro_rules! handlers {
                         .expect("no handler set but callback is still called - this is a bug!");
                     let ret = $block;
 
+                    // SAFETY: The temporary vtable was allocated solely to satisfy
+                    // the Terminal layout expected by the callback signature. Drop
+                    // it explicitly while intentionally leaving the borrowed
+                    // terminal handle itself untouched.
+                    unsafe { ::core::ptr::drop_in_place(&mut term.vtable) };
+
                     ret
                 }
 
                 self.vtable.$name = Some(::std::boxed::Box::new(f));
 
-                self.set(
+                // USERDATA is a raw pointer option: pass the heap allocation
+                // itself, not the address of the Box smart pointer field stored
+                // inline in Terminal.
+                self.set_ptr(
                     $crate::ffi::TerminalOption::USERDATA,
-                    &self.vtable
+                    self.vtable.as_ref() as *const VTable<'alloc, 'cb> as *const ::std::ffi::c_void,
                 )?;
 
                 // The callback must be coerced into a function *pointer*
@@ -1109,5 +1134,68 @@ handlers! {
         } else {
             false
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::cell::Cell;
+    use std::rc::Rc;
+
+    #[inline(never)]
+    fn build_terminal(callback_count: Rc<Cell<usize>>) -> Terminal<'static, 'static> {
+        let mut terminal = Terminal::new(Options {
+            cols: 80,
+            rows: 24,
+            max_scrollback: 1000,
+        })
+        .expect("terminal should initialize");
+
+        terminal
+            .on_device_attributes(move |_term| {
+                callback_count.set(callback_count.get() + 1);
+                Some(DeviceAttributes {
+                    primary: PrimaryDeviceAttributes::new(
+                        ConformanceLevel::VT220,
+                        [DeviceAttributeFeature::ANSI_COLOR],
+                    ),
+                    secondary: SecondaryDeviceAttributes {
+                        device_type: DeviceType::VT220,
+                        firmware_version: 1,
+                        rom_cartridge: 0,
+                    },
+                    tertiary: TertiaryDeviceAttributes { unit_id: 0 },
+                })
+            })
+            .expect("callback should register");
+
+        terminal
+    }
+
+    #[inline(never)]
+    fn clobber_stack() {
+        let mut scratch = [0usize; 4096];
+        for (i, slot) in scratch.iter_mut().enumerate() {
+            *slot = i;
+        }
+        std::hint::black_box(scratch);
+    }
+
+    #[test]
+    fn callbacks_survive_terminal_moves() {
+        let callback_count = Rc::new(Cell::new(0usize));
+        let mut terminal = build_terminal(callback_count.clone());
+
+        // Force some additional stack activity after the move out of
+        // build_terminal so stale stack pointers are more likely to break.
+        for _ in 0..32 {
+            clobber_stack();
+        }
+
+        // Primary DA request (CSI c) should invoke on_device_attributes.
+        terminal.vt_write(b"\x1b[c");
+
+        assert_eq!(callback_count.get(), 1);
     }
 }
