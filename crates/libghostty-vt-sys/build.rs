@@ -47,6 +47,13 @@ fn main() {
         Err(_) => fetch_ghostty(&out_dir),
     };
 
+    // The pinned ghostty's build.zig unconditionally attaches an xcframework
+    // step to the install target on macOS→macOS builds, which invokes
+    // `xcodebuild -create-xcframework` and therefore requires full Xcode.
+    // For `-Demit-lib-vt` we don't want or need the xcframework, so neuter
+    // that block in the fetched copy. Harmless on non-darwin hosts.
+    patch_disable_xcframework(&ghostty_dir);
+
     // Build libghostty-vt via zig. The single `-Demit-lib-vt` flag causes
     // ghostty's build to emit both the shared library (.so/.dylib) and the
     // static archive (.a) into the install prefix. The `link_static` flag
@@ -203,6 +210,28 @@ fn fetch_ghostty(out_dir: &Path) -> PathBuf {
     std::fs::write(&stamp, GHOSTTY_COMMIT).unwrap_or_else(|e| panic!("failed to write stamp: {e}"));
 
     src_dir
+}
+
+/// Rewrite the fetched ghostty `build.zig` so the lib-vt-only install step
+/// doesn't depend on the xcframework step (which requires full Xcode).
+/// Idempotent: if the guard is already present, we leave the file alone.
+fn patch_disable_xcframework(ghostty_dir: &Path) {
+    let build_zig = ghostty_dir.join("build.zig");
+    let Ok(contents) = std::fs::read_to_string(&build_zig) else {
+        return;
+    };
+
+    let needle =
+        "if (builtin.os.tag.isDarwin() and config.target.result.os.tag.isDarwin()) {";
+    let patched = "if (false and builtin.os.tag.isDarwin() and config.target.result.os.tag.isDarwin()) {";
+
+    if contents.contains(patched) || !contents.contains(needle) {
+        return;
+    }
+
+    let new_contents = contents.replacen(needle, patched, 1);
+    std::fs::write(&build_zig, new_contents)
+        .unwrap_or_else(|e| panic!("failed to patch {}: {e}", build_zig.display()));
 }
 
 fn run(mut command: Command, context: &str) {
