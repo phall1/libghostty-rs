@@ -8,8 +8,9 @@ repository.workspace = true
 rust-version.workspace = true
 
 [features]
-default = ["kitty-graphics"]
+default = ["vendored", "simd", "kitty-graphics"]
 allocator_api = ["dep:allocator-api2"]
+vendored = ["libghostty-vt-sys/vendored"]
 kitty-graphics = ["libghostty-vt-sys/kitty-graphics"]
 simd = ["libghostty-vt-sys/simd"]
 link-static = ["libghostty-vt-sys/link-static"]
@@ -18,12 +19,16 @@ png = ["dep:png"]
 [dependencies]
 allocator-api2 = { version = "0.4.0", optional = true }
 bitflags = "2.11.0"
-libghostty-vt-sys.workspace = true
+# `default-features = false` so downstream consumers can actually turn off
+# `simd` (which drags in a libc++ link requirement on Linux). The high-level
+# crate re-exports `vendored`/`simd` as forwarding features and includes them
+# in its own `default` set to preserve prior behavior for existing consumers.
+libghostty-vt-sys = { workspace = true, default-features = false }
 int-enum = "1.2.0"
 png = { version = "0.18.1", optional = true }
 
 [dev-dependencies]
-libghostty-vt-sys.workspace = true
+libghostty-vt-sys = { workspace = true, default-features = false, features = ["vendored", "simd"] }
 
 [package.metadata.docs.rs]
 all-features = true
