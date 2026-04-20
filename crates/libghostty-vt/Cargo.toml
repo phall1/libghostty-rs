@@ -19,16 +19,20 @@ png = ["dep:png"]
 [dependencies]
 allocator-api2 = { version = "0.4.0", optional = true }
 bitflags = "2.11.0"
-# `default-features = false` so downstream consumers can actually turn off
-# `simd` (which drags in a libc++ link requirement on Linux). The high-level
-# crate re-exports `vendored`/`simd` as forwarding features and includes them
-# in its own `default` set to preserve prior behavior for existing consumers.
-libghostty-vt-sys = { workspace = true, default-features = false }
+# Pinned directly (not via `workspace = true`) so we can set
+# `default-features = false`. Cargo disallows overriding
+# `default-features` on a workspace-inherited dep, which would otherwise
+# prevent downstream consumers from turning `simd` off (it drags in a
+# libc++ link requirement on Linux). This crate re-exports
+# `vendored`/`simd`/`link-static`/`kitty-graphics` as forwarding features
+# and keeps `vendored`+`simd`+`kitty-graphics` in its own `default` set so
+# existing consumers see unchanged behavior.
+libghostty-vt-sys = { path = "../libghostty-vt-sys", version = "0.1.1", default-features = false }
 int-enum = "1.2.0"
 png = { version = "0.18.1", optional = true }
 
 [dev-dependencies]
-libghostty-vt-sys = { workspace = true, default-features = false, features = ["vendored", "simd"] }
+libghostty-vt-sys = { path = "../libghostty-vt-sys", version = "0.1.1", default-features = false, features = ["vendored", "simd"] }
 
 [package.metadata.docs.rs]
 all-features = true
