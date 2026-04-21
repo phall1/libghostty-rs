@@ -8,8 +8,9 @@ repository.workspace = true
 rust-version.workspace = true
 
 [features]
-default = ["kitty-graphics"]
+default = ["vendored", "simd", "kitty-graphics"]
 allocator_api = ["dep:allocator-api2"]
+vendored = ["libghostty-vt-sys/vendored"]
 kitty-graphics = ["libghostty-vt-sys/kitty-graphics"]
 simd = ["libghostty-vt-sys/simd"]
 link-static = ["libghostty-vt-sys/link-static"]
@@ -18,12 +19,20 @@ png = ["dep:png"]
 [dependencies]
 allocator-api2 = { version = "0.4.0", optional = true }
 bitflags = "2.11.0"
-libghostty-vt-sys.workspace = true
+# Pinned directly (not via `workspace = true`) so we can set
+# `default-features = false`. Cargo disallows overriding
+# `default-features` on a workspace-inherited dep, which would otherwise
+# prevent downstream consumers from turning `simd` off (it drags in a
+# libc++ link requirement on Linux). This crate re-exports
+# `vendored`/`simd`/`link-static`/`kitty-graphics` as forwarding features
+# and keeps `vendored`+`simd`+`kitty-graphics` in its own `default` set so
+# existing consumers see unchanged behavior.
+libghostty-vt-sys = { path = "../libghostty-vt-sys", version = "0.1.1", default-features = false }
 int-enum = "1.2.0"
 png = { version = "0.18.1", optional = true }
 
 [dev-dependencies]
-libghostty-vt-sys.workspace = true
+libghostty-vt-sys = { path = "../libghostty-vt-sys", version = "0.1.1", default-features = false, features = ["vendored", "simd"] }
 
 [package.metadata.docs.rs]
 all-features = true
