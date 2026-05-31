@@ -3,8 +3,13 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 /// Pinned ghostty commit. Update this to pull a newer version.
-const GHOSTTY_REPO: &str = "https://github.com/ghostty-org/ghostty.git";
-const GHOSTTY_COMMIT: &str = "b869a6e5ab0a50ce01e8eb5aa408a02b3cbe4f3a";
+///
+/// Vendors phall1/ghostty at the resize-overflow fix (6d89054f3, "fix:
+/// resize overflow"): upstream b869a6e5 aborts in `PageList.resizeCols`
+/// with an integer overflow when both grid axes shrink in one resize()
+/// call. The fix is not yet on ghostty-org/ghostty.
+const GHOSTTY_REPO: &str = "https://github.com/phall1/ghostty.git";
+const GHOSTTY_COMMIT: &str = "6d89054f37c89700af5d75143ce3644660d49ec1";
 
 #[derive(Clone, Copy)]
 enum LinkMode {
