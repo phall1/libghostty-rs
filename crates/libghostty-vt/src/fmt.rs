@@ -67,7 +67,13 @@ impl<'t, 'alloc: 'cb, 'cb: 't> Formatter<'t, 'alloc, 'cb> {
             trim: opts.trim,
             extra: ffi::FormatterTerminalExtra::default(),
             unwrap: opts.unwrap,
-            selection: match opts.selection {
+            // Borrow the selection rather than move it: matching `opts.selection`
+            // by value binds an owned `Selection` that is dropped at the end of
+            // the match arm, so `&s.inner` would dangle before
+            // `ghostty_formatter_terminal_new` reads through it. Matching by
+            // reference keeps the `Selection` owned by `opts` (alive until this
+            // function returns) so the pointer stays valid across the FFI call.
+            selection: match &opts.selection {
                 Some(s) => &s.inner,
                 None => std::ptr::null(),
             },
@@ -178,4 +184,46 @@ pub enum Format {
     Vt = ffi::FormatterFormat::VT,
     /// HTML with inline styles.
     Html = ffi::FormatterFormat::HTML,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{Terminal, TerminalOptions};
+
+    /// Regression: `new_inner` matched `opts.selection` *by value*, so the
+    /// owned `Selection` dropped at the end of the match arm and `&s.inner`
+    /// dangled before `ghostty_formatter_terminal_new` read through it — the
+    /// FFI call then failed with `InvalidValue`. Borrowing the selection
+    /// (`match &opts.selection`) keeps it alive across the call. This exercises
+    /// the selection-restricted `Formatter::new` path that used to error.
+    #[test]
+    fn formatter_new_with_selection_is_sound() {
+        let mut terminal = Terminal::new(TerminalOptions {
+            cols: 80,
+            rows: 24,
+            max_scrollback: 0,
+        })
+        .expect("terminal");
+        terminal.vt_write(b"hello selection world");
+
+        let selection = terminal
+            .select_all()
+            .expect("select_all")
+            .expect("a non-empty screen yields a selection");
+
+        let formatter = Formatter::new(
+            &terminal,
+            FormatterOptions {
+                format: Format::Plain,
+                trim: true,
+                unwrap: false,
+                selection: Some(selection),
+            },
+        );
+        assert!(
+            formatter.is_ok(),
+            "Formatter::new with a selection must succeed after the borrow fix (was Err(InvalidValue))"
+        );
+    }
 }
