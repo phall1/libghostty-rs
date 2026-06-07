@@ -3,8 +3,13 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 /// Pinned ghostty commit. Update this to pull a newer version.
+///
+/// Tracks ghostty-org/ghostty at a tip that carries the upstream
+/// `resizeCols` cursor-saturation fix (ghostty-org 4782e59ea, "saturate
+/// cursor subtraction in resizeCols", #12907), which prevents an integer
+/// overflow abort when both grid axes shrink in one resize() call.
 const GHOSTTY_REPO: &str = "https://github.com/ghostty-org/ghostty.git";
-const GHOSTTY_COMMIT: &str = "bfe633a9487892ff3d27ed727db540267f22ef90";
+const GHOSTTY_COMMIT: &str = "7092b39445bebfd3178f562eb9e5fa9a95a32332";
 
 #[derive(Clone, Copy)]
 enum LinkMode {
