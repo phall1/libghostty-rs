@@ -171,6 +171,17 @@ fn build_vendored(link_mode: LinkMode) {
     if target != host {
         let zig_target = zig_target(&target);
         build.arg(format!("-Dtarget={zig_target}"));
+
+        // Apple iOS cross-compiles need the matching SDK sysroot so zig can
+        // resolve Darwin libc symbols (sigaction, waitpid, posix_memalign,
+        // realpath$DARWIN_EXTSN, …). macOS native builds get this from the host
+        // automatically; cross targets do not.
+        if let Some(sdk) = apple_sdk_sysroot(&target) {
+            build.arg("--sysroot").arg(&sdk);
+            // zig's Darwin linker also honors SDKROOT for locating the SDK's
+            // libSystem stubs.
+            build.env("SDKROOT", &sdk);
+        }
     }
 
     run(build, "zig build");
@@ -382,6 +393,25 @@ fn library_search_dirs(target: &str, install_prefix: &Path) -> Vec<PathBuf> {
     dirs
 }
 
+/// The Apple SDK sysroot for an iOS Rust target, via `xcrun`, so zig links
+/// against the iOS SDK's libSystem stubs. Returns `None` for non-iOS targets.
+fn apple_sdk_sysroot(target: &str) -> Option<String> {
+    let sdk = match target {
+        "aarch64-apple-ios" => "iphoneos",
+        "aarch64-apple-ios-sim" | "x86_64-apple-ios" => "iphonesimulator",
+        _ => return None,
+    };
+    let output = std::process::Command::new("xcrun")
+        .args(["--sdk", sdk, "--show-sdk-path"])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let path = String::from_utf8(output.stdout).ok()?.trim().to_owned();
+    if path.is_empty() { None } else { Some(path) }
+}
+
 fn zig_target(target: &str) -> String {
     let value = match target {
         "x86_64-unknown-linux-gnu" => "x86_64-linux-gnu",
@@ -390,6 +420,9 @@ fn zig_target(target: &str) -> String {
         "aarch64-unknown-linux-musl" => "aarch64-linux-musl",
         "aarch64-apple-darwin" => "aarch64-macos-none",
         "x86_64-apple-darwin" => "x86_64-macos-none",
+        "aarch64-apple-ios" => "aarch64-ios-none",
+        "aarch64-apple-ios-sim" => "aarch64-ios-simulator",
+        "x86_64-apple-ios" => "x86_64-ios-simulator",
         "x86_64-pc-windows-gnu" => "x86_64-windows-gnu",
         "aarch64-pc-windows-gnullvm" => "aarch64-windows-gnu",
         "x86_64-pc-windows-msvc" => "x86_64-windows-msvc",
