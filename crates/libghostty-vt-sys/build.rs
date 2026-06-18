@@ -3,8 +3,13 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 /// Pinned ghostty commit. Update this to pull a newer version.
-const GHOSTTY_REPO: &str = "https://github.com/ghostty-org/ghostty.git";
-const GHOSTTY_COMMIT: &str = "fdbf9ff3a31d7531b691cb49c98fc465a1a503a0";
+///
+/// Vendors phall1/ghostty at upstream `main` plus the `desktop_notification`
+/// callback (OSC 9 / OSC 777) on `feat/vt-desktop-notification-callback`. This
+/// supersedes the earlier resize-overflow fork patch (6d89054f3) — upstream
+/// has since landed its own resize-overflow fixes (#12907, #12935).
+const GHOSTTY_REPO: &str = "https://github.com/phall1/ghostty.git";
+const GHOSTTY_COMMIT: &str = "5fa750e873e5c22bff6758b218cdf2f7a32fac46";
 
 #[derive(Clone, Copy)]
 enum LinkMode {

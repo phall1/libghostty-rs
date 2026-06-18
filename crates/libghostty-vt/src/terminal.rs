@@ -1416,6 +1416,37 @@ handlers! {
             false
         }
     }
+
+    /// Call the given function when the terminal requests a desktop
+    /// notification via escape sequences (OSC 9 or OSC 777).
+    ///
+    /// For OSC 9 the `title` is empty and the `body` carries the message;
+    /// OSC 777 provides both a `title` and a `body`. The string slices are
+    /// only valid for the duration of the call; copy them if they need to
+    /// persist. The `title` may be empty.
+    pub fn on_desktop_notification(
+        &mut self,
+        tag = DESKTOP_NOTIFICATION,
+        from = GhosttyTerminalDesktopNotificationFn(title: ffi::String, body: ffi::String),
+        to = <'t>DesktopNotificationFn(&'t str, &'t str),
+    ) |term, func| {
+        // SAFETY: We trust libghostty to provide valid pointer/length pairs
+        // for the duration of this call given we uphold all lifetime
+        // invariants (no `vt_write` reentrancy via the mutable reference).
+        let title_str = if title.ptr.is_null() || title.len == 0 {
+            ""
+        } else {
+            let bytes = unsafe { std::slice::from_raw_parts(title.ptr, title.len) };
+            std::str::from_utf8(bytes).unwrap_or("")
+        };
+        let body_str = if body.ptr.is_null() || body.len == 0 {
+            ""
+        } else {
+            let bytes = unsafe { std::slice::from_raw_parts(body.ptr, body.len) };
+            std::str::from_utf8(bytes).unwrap_or("")
+        };
+        func(&term, title_str, body_str);
+    }
 }
 
 #[cfg(test)]
@@ -1612,6 +1643,42 @@ mod tests {
             .expect("glyph protocol should disable")
             .set_glyph_protocol_enabled(true)
             .expect("glyph protocol should enable");
+    }
+
+    /// Send OSC 9 and OSC 777 desktop notification sequences and verify the
+    /// `on_desktop_notification` callback fires with the expected title/body.
+    #[test]
+    fn desktop_notification_callback_returns_correct_title_and_body() {
+        let captured_title: RefCell<String> = RefCell::new(String::new());
+        let captured_body: RefCell<String> = RefCell::new(String::new());
+        let callback_count: Cell<usize> = Cell::new(0);
+
+        let mut terminal = Terminal::new(Options {
+            cols: 80,
+            rows: 24,
+            max_scrollback: 0,
+        })
+        .expect("terminal should initialize");
+
+        terminal
+            .on_desktop_notification(|_term, title, body| {
+                callback_count.set(callback_count.get() + 1);
+                *captured_title.borrow_mut() = title.to_owned();
+                *captured_body.borrow_mut() = body.to_owned();
+            })
+            .expect("callback should register");
+
+        // OSC 777 ; notify ; title ; body ST carries both a title and a body.
+        terminal.vt_write(b"\x1b]777;notify;Title;Body\x1b\\");
+        assert_eq!(callback_count.get(), 1);
+        assert_eq!(*captured_title.borrow(), "Title");
+        assert_eq!(*captured_body.borrow(), "Body");
+
+        // OSC 9 ; body BEL has an empty title and the body only.
+        terminal.vt_write(b"\x1b]9;Hello world\x07");
+        assert_eq!(callback_count.get(), 2);
+        assert_eq!(*captured_title.borrow(), "");
+        assert_eq!(*captured_body.borrow(), "Hello world");
     }
 
     /// Explicitly relocate the Terminal into distinct storage, then verify the

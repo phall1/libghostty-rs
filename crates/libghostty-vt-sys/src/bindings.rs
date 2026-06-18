@@ -2082,6 +2082,15 @@ pub type TerminalTitleChangedFn = ::std::option::Option<
 pub type TerminalPwdChangedFn = ::std::option::Option<
     unsafe extern "C" fn(terminal: Terminal, userdata: *mut ::std::os::raw::c_void),
 >;
+#[doc = " Callback function type for desktop notifications.\n\n Called when the terminal requests a desktop notification via escape\n sequences: OSC 9 (`ESC ] 9 ; <body> ST`) or OSC 777\n (`ESC ] 777 ; notify ; <title> ; <body> ST`). For OSC 9 the title is\n an empty string and the body carries the message.\n\n The title and body strings are only valid for the duration of the\n call; copy them if they need to persist. The title may be empty.\n\n"]
+pub type TerminalDesktopNotificationFn = ::std::option::Option<
+    unsafe extern "C" fn(
+        terminal: Terminal,
+        userdata: *mut ::std::os::raw::c_void,
+        title: String,
+        body: String,
+    ),
+>;
 #[doc = " Callback function type for write_pty.\n\n Called when the terminal needs to write data back to the pty, for\n example in response to a device status report or mode query. The\n data is only valid for the duration of the call; callers must copy\n it if it needs to persist.\n\n"]
 pub type TerminalWritePtyFn = ::std::option::Option<
     unsafe extern "C" fn(
@@ -2150,7 +2159,8 @@ pub mod TerminalOption {
     pub const GLYPH_PROTOCOL: Type = 24;
     #[doc = " Callback invoked when the terminal pwd changes via escape\n sequences (OSC 7, OSC 9, or OSC 1337 CurrentDir). Set to NULL\n to ignore pwd change events.\n\n Input type: GhosttyTerminalPwdChangedFn"]
     pub const PWD_CHANGED: Type = 25;
-    #[doc = " Callback invoked when the terminal pwd changes via escape\n sequences (OSC 7, OSC 9, or OSC 1337 CurrentDir). Set to NULL\n to ignore pwd change events.\n\n Input type: GhosttyTerminalPwdChangedFn"]
+    #[doc = " Callback invoked when the terminal requests a desktop notification\n via escape sequences (OSC 9 or OSC 777). For OSC 9 the title is\n empty and the body carries the message; OSC 777 provides both a\n title and a body. The strings passed to the callback are only valid\n for the duration of the call. Set to NULL to ignore desktop\n notification requests.\n\n Input type: GhosttyTerminalDesktopNotificationFn"]
+    pub const DESKTOP_NOTIFICATION: Type = 26;
     pub const MAX_VALUE: Type = 2147483647;
 }
 pub mod TerminalData {
