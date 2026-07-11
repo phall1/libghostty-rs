@@ -268,3 +268,47 @@ pub enum Format {
     /// HTML with inline styles.
     Html = ffi::FormatterFormat::HTML,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{
+        TerminalOptions,
+        selection::Selection,
+        terminal::{Point, PointCoordinate},
+    };
+
+    #[test]
+    fn formatter_formats_borrowed_selection() {
+        let mut terminal = Terminal::new(TerminalOptions {
+            cols: 8,
+            rows: 3,
+            max_scrollback: 0,
+        })
+        .expect("terminal should initialize");
+        terminal.vt_write(b"abcdef");
+
+        let start = terminal
+            .grid_ref(Point::Active(PointCoordinate { x: 1, y: 0 }))
+            .expect("selection start should resolve");
+        let end = terminal
+            .grid_ref(Point::Active(PointCoordinate { x: 3, y: 0 }))
+            .expect("selection end should resolve");
+        let selection = Selection::new(start, end, false);
+
+        let mut formatter = Formatter::new(
+            &terminal,
+            FormatterOptions::new()
+                .with_format(Format::Plain)
+                .with_trim(true)
+                .with_selection(&selection),
+        )
+        .expect("selection formatter should initialize");
+
+        let mut output = [0; 8];
+        let len = formatter
+            .format_buf(&mut output)
+            .expect("selection should format");
+        assert_eq!(&output[..len], b"bcd");
+    }
+}
