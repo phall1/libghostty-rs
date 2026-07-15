@@ -26,6 +26,56 @@ use crate::{
 #[derive(Debug)]
 pub struct Encoder<'alloc>(Object<'alloc, ffi::KeyEncoderImpl>);
 
+/// Copyable snapshot of every key-encoder option derived from a terminal.
+///
+/// Unlike [`Terminal`], this value is `Send` and may be captured on a terminal
+/// owner thread, transferred elsewhere, and applied to an [`Encoder`] there.
+/// `macos_option_as_alt` is intentionally absent because
+/// [`Encoder::set_options_from_terminal`] resets it to [`OptionAsAlt::False`]
+/// rather than deriving it from terminal state.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[allow(clippy::struct_excessive_bools)]
+pub struct EncoderOptions {
+    /// DEC mode 1: cursor key application mode.
+    pub cursor_key_application: bool,
+    /// DEC mode 66: keypad key application mode.
+    pub keypad_key_application: bool,
+    /// DEC mode 1035: ignore keypad with numlock.
+    pub ignore_keypad_with_numlock: bool,
+    /// DEC mode 1036: alt sends an escape prefix.
+    pub alt_esc_prefix: bool,
+    /// xterm modifyOtherKeys mode 2.
+    pub modify_other_keys_state_2: bool,
+    /// Current Kitty keyboard protocol flags.
+    pub kitty_flags: KittyKeyFlags,
+    /// DEC backarrow key mode.
+    pub backarrow_key_mode: bool,
+}
+
+impl EncoderOptions {
+    /// Capture exactly the options that
+    /// [`Encoder::set_options_from_terminal`] would apply.
+    pub fn from_terminal(terminal: &Terminal<'_, '_>) -> Result<Self> {
+        let mut raw = ffi::KeyEncoderTerminalOptions {
+            size: std::mem::size_of::<ffi::KeyEncoderTerminalOptions>(),
+            ..Default::default()
+        };
+        let result = unsafe {
+            ffi::ghostty_key_encoder_terminal_options(terminal.inner.as_raw(), &raw mut raw)
+        };
+        from_result(result)?;
+        Ok(Self {
+            cursor_key_application: raw.cursor_key_application,
+            keypad_key_application: raw.keypad_key_application,
+            ignore_keypad_with_numlock: raw.ignore_keypad_with_numlock,
+            alt_esc_prefix: raw.alt_esc_prefix,
+            modify_other_keys_state_2: raw.modify_other_keys_state_2,
+            kitty_flags: KittyKeyFlags::from_bits_retain(raw.kitty_flags),
+            backarrow_key_mode: raw.backarrow_key_mode,
+        })
+    }
+}
+
 impl<'alloc> Encoder<'alloc> {
     /// Create a new key encoder instance.
     pub fn new() -> Result<Self> {
@@ -138,6 +188,21 @@ impl<'alloc> Encoder<'alloc> {
             ffi::ghostty_key_encoder_setopt_from_terminal(self.0.as_raw(), terminal.inner.as_raw());
         }
         self
+    }
+
+    /// Apply a terminal-derived option snapshot.
+    ///
+    /// This is byte-for-byte equivalent to [`Self::set_options_from_terminal`]
+    /// for the terminal from which `options` was captured.
+    pub fn set_options(&mut self, options: EncoderOptions) -> &mut Self {
+        self.set_cursor_key_application(options.cursor_key_application)
+            .set_keypad_key_application(options.keypad_key_application)
+            .set_ignore_keypad_with_numlock(options.ignore_keypad_with_numlock)
+            .set_alt_esc_prefix(options.alt_esc_prefix)
+            .set_modify_other_keys_state_2(options.modify_other_keys_state_2)
+            .set_kitty_flags(options.kitty_flags)
+            .set_macos_option_as_alt(OptionAsAlt::False)
+            .set_backarrow_key_mode(options.backarrow_key_mode)
     }
 
     /// Set terminal DEC mode 1: cursor key application mode.
@@ -655,5 +720,70 @@ bitflags::bitflags! {
         const REPORT_ASSOCIATED = ffi::KITTY_KEY_REPORT_ASSOCIATED;
         /// All Kitty keyboard protocol flags enabled
         const ALL = ffi::KITTY_KEY_ALL;
+    }
+}
+
+#[cfg(test)]
+mod snapshot_tests {
+    use super::*;
+    use crate::{Terminal, TerminalOptions};
+
+    fn terminal_with_modes() -> Terminal<'static, 'static> {
+        let mut terminal = Terminal::new(TerminalOptions {
+            cols: 80,
+            rows: 24,
+            max_scrollback: 0,
+        })
+        .expect("terminal");
+        terminal.vt_write(b"\x1b[?1h\x1b[?66h\x1b[?1035h\x1b[?1036h\x1b[?67h\x1b[>4;2m\x1b[>31u");
+        terminal
+    }
+
+    fn assert_send<T: Send>() {}
+
+    #[test]
+    fn encoder_options_are_send() {
+        assert_send::<EncoderOptions>();
+    }
+
+    #[test]
+    fn snapshot_apply_is_byte_identical_to_live_terminal() {
+        let terminal = terminal_with_modes();
+        let options = EncoderOptions::from_terminal(&terminal).expect("capture");
+        assert!(options.cursor_key_application);
+        assert!(options.keypad_key_application);
+        assert!(options.ignore_keypad_with_numlock);
+        assert!(options.alt_esc_prefix);
+        assert!(options.modify_other_keys_state_2);
+        assert_eq!(options.kitty_flags, KittyKeyFlags::ALL);
+        assert!(options.backarrow_key_mode);
+
+        for (key, mods, text) in [
+            (Key::ArrowUp, Mods::empty(), None),
+            (Key::Numpad1, Mods::NUM_LOCK, None),
+            (Key::A, Mods::ALT | Mods::SHIFT, Some("A")),
+            (Key::Tab, Mods::SHIFT, None),
+            (Key::Backspace, Mods::empty(), None),
+        ] {
+            let mut event = Event::new().expect("event");
+            event
+                .set_action(Action::Press)
+                .set_key(key)
+                .set_mods(mods)
+                .set_utf8(text);
+
+            let mut live = Encoder::new().expect("live encoder");
+            live.set_options_from_terminal(&terminal);
+            let mut snapshot = Encoder::new().expect("snapshot encoder");
+            snapshot.set_options(options);
+            let mut live_bytes = Vec::new();
+            let mut snapshot_bytes = Vec::new();
+            live.encode_to_vec(&event, &mut live_bytes)
+                .expect("live encode");
+            snapshot
+                .encode_to_vec(&event, &mut snapshot_bytes)
+                .expect("snapshot encode");
+            assert_eq!(live_bytes, snapshot_bytes, "key {key:?}, mods {mods:?}");
+        }
     }
 }
