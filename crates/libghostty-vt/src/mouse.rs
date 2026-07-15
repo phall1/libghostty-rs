@@ -31,6 +31,37 @@ pub use ffi::MousePosition as Position;
 #[derive(Debug)]
 pub struct Encoder<'alloc>(Object<'alloc, ffi::MouseEncoderImpl>);
 
+/// Copyable snapshot of the terminal-derived mouse encoder options.
+///
+/// The terminal resolves simultaneous tracking and format modes before these
+/// values are captured, so consumers do not need to duplicate mode precedence.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct EncoderOptions {
+    /// Effective mouse tracking mode.
+    pub tracking_mode: TrackingMode,
+    /// Effective mouse output format.
+    pub format: Format,
+}
+
+impl EncoderOptions {
+    /// Capture exactly the options that
+    /// [`Encoder::set_options_from_terminal`] would apply.
+    pub fn from_terminal(terminal: &Terminal<'_, '_>) -> Result<Self> {
+        let mut raw = ffi::MouseEncoderTerminalOptions {
+            size: std::mem::size_of::<ffi::MouseEncoderTerminalOptions>(),
+            ..Default::default()
+        };
+        let result = unsafe {
+            ffi::ghostty_mouse_encoder_terminal_options(terminal.inner.as_raw(), &raw mut raw)
+        };
+        from_result(result)?;
+        Ok(Self {
+            tracking_mode: TrackingMode::try_from(raw.event).map_err(|_| Error::InvalidValue)?,
+            format: Format::try_from(raw.format).map_err(|_| Error::InvalidValue)?,
+        })
+    }
+}
+
 impl<'alloc> Encoder<'alloc> {
     /// Create a new mouse encoder instance.
     pub fn new() -> Result<Self> {
@@ -134,6 +165,17 @@ impl<'alloc> Encoder<'alloc> {
         }
         self
     }
+    /// Apply a terminal-derived option snapshot.
+    ///
+    /// Like [`Self::set_options_from_terminal`], this clears motion
+    /// deduplication state while preserving the any-button state.
+    pub fn set_options(&mut self, options: EncoderOptions) -> &mut Self {
+        self.set_tracking_mode(options.tracking_mode)
+            .set_format(options.format);
+        self.reset();
+        self
+    }
+
     /// Set mouse tracking mode.
     pub fn set_tracking_mode(&mut self, value: TrackingMode) -> &mut Self {
         unsafe {
@@ -389,4 +431,66 @@ pub enum Button {
     Nine = ffi::MouseButton::NINE,
     Ten = ffi::MouseButton::TEN,
     Eleven = ffi::MouseButton::ELEVEN,
+}
+
+#[cfg(test)]
+mod snapshot_tests {
+    use super::*;
+    use crate::{Terminal, TerminalOptions};
+
+    fn assert_send<T: Send>() {}
+
+    #[test]
+    fn encoder_options_are_send() {
+        assert_send::<EncoderOptions>();
+    }
+
+    #[test]
+    fn snapshot_apply_is_byte_identical_for_effective_mode_precedence() {
+        for modes in [
+            &b""[..],
+            &b"\x1b[?9h"[..],
+            &b"\x1b[?1000h\x1b[?1005h"[..],
+            &b"\x1b[?1000h\x1b[?1002h\x1b[?1006h"[..],
+            &b"\x1b[?1000h\x1b[?1002h\x1b[?1003h\x1b[?1006h\x1b[?1016h"[..],
+        ] {
+            let mut terminal = Terminal::new(TerminalOptions {
+                cols: 80,
+                rows: 24,
+                max_scrollback: 0,
+            })
+            .expect("terminal");
+            terminal.vt_write(modes);
+            let options = EncoderOptions::from_terminal(&terminal).expect("capture");
+
+            let mut event = Event::new().expect("event");
+            event
+                .set_action(Action::Press)
+                .set_button(Some(Button::Left))
+                .set_position(Position { x: 24.0, y: 32.0 });
+            let size = EncoderSize {
+                screen_width: 640,
+                screen_height: 384,
+                cell_width: 8,
+                cell_height: 16,
+                padding_top: 0,
+                padding_bottom: 0,
+                padding_right: 0,
+                padding_left: 0,
+            };
+
+            let mut live = Encoder::new().expect("live encoder");
+            live.set_options_from_terminal(&terminal).set_size(size);
+            let mut snapshot = Encoder::new().expect("snapshot encoder");
+            snapshot.set_options(options).set_size(size);
+            let mut live_bytes = Vec::new();
+            let mut snapshot_bytes = Vec::new();
+            live.encode_to_vec(&event, &mut live_bytes)
+                .expect("live encode");
+            snapshot
+                .encode_to_vec(&event, &mut snapshot_bytes)
+                .expect("snapshot encode");
+            assert_eq!(live_bytes, snapshot_bytes, "modes {modes:?}");
+        }
+    }
 }
