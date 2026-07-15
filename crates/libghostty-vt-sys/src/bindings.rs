@@ -3397,7 +3397,7 @@ pub mod Key {
 unsafe extern "C" {
     #[doc = " Create a new key event instance.\n\n Creates a new key event with default values. The event must be freed using\n ghostty_key_event_free() when no longer needed.\n\n"]
     pub fn ghostty_key_event_new(allocator: *const Allocator, event: *mut KeyEvent)
-        -> Result::Type;
+    -> Result::Type;
 }
 unsafe extern "C" {
     #[doc = " Free a key event instance.\n\n Releases all resources associated with the key event. After this call,\n the event handle becomes invalid and must not be used.\n\n"]
@@ -3510,6 +3510,49 @@ pub mod KeyEncoderOption {
     pub const BACKARROW_KEY_MODE: Type = 7;
     #[doc = " Backarrow key mode (value: bool)\n See https://vt100.net/dec/ek-vt3xx-tp-002.pdf page 170\n If `false` (the default), `backspace` emits 0x7f\n If `true`, `backspace` emits 0x08"]
     pub const MAX_VALUE: Type = 2147483647;
+}
+#[doc = " Terminal-derived key encoder options."]
+#[repr(C)]
+#[derive(Debug, Default, Copy, Clone)]
+pub struct KeyEncoderTerminalOptions {
+    pub size: usize,
+    pub cursor_key_application: bool,
+    pub keypad_key_application: bool,
+    pub ignore_keypad_with_numlock: bool,
+    pub alt_esc_prefix: bool,
+    pub modify_other_keys_state_2: bool,
+    pub kitty_flags: KittyKeyFlags,
+    pub backarrow_key_mode: bool,
+}
+#[allow(clippy::unnecessary_operation, clippy::identity_op)]
+const _: () = {
+    ["Size of KeyEncoderTerminalOptions"]
+        [::std::mem::size_of::<KeyEncoderTerminalOptions>() - 16usize];
+    ["Alignment of KeyEncoderTerminalOptions"]
+        [::std::mem::align_of::<KeyEncoderTerminalOptions>() - 8usize];
+    ["Offset of field: KeyEncoderTerminalOptions::size"]
+        [::std::mem::offset_of!(KeyEncoderTerminalOptions, size) - 0usize];
+    ["Offset of field: KeyEncoderTerminalOptions::cursor_key_application"]
+        [::std::mem::offset_of!(KeyEncoderTerminalOptions, cursor_key_application) - 8usize];
+    ["Offset of field: KeyEncoderTerminalOptions::keypad_key_application"]
+        [::std::mem::offset_of!(KeyEncoderTerminalOptions, keypad_key_application) - 9usize];
+    ["Offset of field: KeyEncoderTerminalOptions::ignore_keypad_with_numlock"]
+        [::std::mem::offset_of!(KeyEncoderTerminalOptions, ignore_keypad_with_numlock) - 10usize];
+    ["Offset of field: KeyEncoderTerminalOptions::alt_esc_prefix"]
+        [::std::mem::offset_of!(KeyEncoderTerminalOptions, alt_esc_prefix) - 11usize];
+    ["Offset of field: KeyEncoderTerminalOptions::modify_other_keys_state_2"]
+        [::std::mem::offset_of!(KeyEncoderTerminalOptions, modify_other_keys_state_2) - 12usize];
+    ["Offset of field: KeyEncoderTerminalOptions::kitty_flags"]
+        [::std::mem::offset_of!(KeyEncoderTerminalOptions, kitty_flags) - 13usize];
+    ["Offset of field: KeyEncoderTerminalOptions::backarrow_key_mode"]
+        [::std::mem::offset_of!(KeyEncoderTerminalOptions, backarrow_key_mode) - 14usize];
+};
+unsafe extern "C" {
+    #[doc = " Capture exactly the options ghostty_key_encoder_setopt_from_terminal applies."]
+    pub fn ghostty_key_encoder_terminal_options(
+        terminal: Terminal,
+        options: *mut KeyEncoderTerminalOptions,
+    ) -> Result::Type;
 }
 unsafe extern "C" {
     #[doc = " Create a new key encoder instance.\n\n Creates a new key encoder with default options. The encoder can be configured\n using ghostty_key_encoder_setopt() and must be freed using\n ghostty_key_encoder_free() when no longer needed.\n\n"]
@@ -3676,6 +3719,43 @@ pub mod MouseFormat {
     pub const URXVT: Type = 3;
     pub const SGR_PIXELS: Type = 4;
     pub const MAX_VALUE: Type = 2147483647;
+}
+#[doc = " Terminal-derived effective mouse encoder options."]
+#[repr(C)]
+#[derive(Debug, Copy, Clone)]
+pub struct MouseEncoderTerminalOptions {
+    pub size: usize,
+    pub event: MouseTrackingMode::Type,
+    pub format: MouseFormat::Type,
+}
+#[allow(clippy::unnecessary_operation, clippy::identity_op)]
+const _: () = {
+    ["Size of MouseEncoderTerminalOptions"]
+        [::std::mem::size_of::<MouseEncoderTerminalOptions>() - 16usize];
+    ["Alignment of MouseEncoderTerminalOptions"]
+        [::std::mem::align_of::<MouseEncoderTerminalOptions>() - 8usize];
+    ["Offset of field: MouseEncoderTerminalOptions::size"]
+        [::std::mem::offset_of!(MouseEncoderTerminalOptions, size) - 0usize];
+    ["Offset of field: MouseEncoderTerminalOptions::event"]
+        [::std::mem::offset_of!(MouseEncoderTerminalOptions, event) - 8usize];
+    ["Offset of field: MouseEncoderTerminalOptions::format"]
+        [::std::mem::offset_of!(MouseEncoderTerminalOptions, format) - 12usize];
+};
+impl Default for MouseEncoderTerminalOptions {
+    fn default() -> Self {
+        let mut s = ::std::mem::MaybeUninit::<Self>::uninit();
+        unsafe {
+            ::std::ptr::write_bytes(s.as_mut_ptr(), 0, 1);
+            s.assume_init()
+        }
+    }
+}
+unsafe extern "C" {
+    #[doc = " Capture exactly the options ghostty_mouse_encoder_setopt_from_terminal applies."]
+    pub fn ghostty_mouse_encoder_terminal_options(
+        terminal: Terminal,
+        options: *mut MouseEncoderTerminalOptions,
+    ) -> Result::Type;
 }
 #[doc = " Mouse encoder size and geometry context.\n\n This describes the rendered terminal geometry used to convert\n surface-space positions into encoded coordinates.\n"]
 #[repr(C)]
