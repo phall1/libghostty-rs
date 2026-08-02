@@ -1802,6 +1802,19 @@ mod tests {
         );
     }
 
+    fn multipage_terminal() -> Terminal<'static, 'static> {
+        let mut source = terminal(512, 4);
+        source
+            .set_scrollback_max_bytes(None)
+            .expect("remove source scrollback byte cap");
+        let full_width_content = [b'x'; 500];
+        for _ in 0..2000 {
+            source.vt_write(&full_width_content);
+            source.vt_write(b"\r\n");
+        }
+        source
+    }
+
     fn capture_all(source: &mut Terminal<'static, 'static>) -> Vec<u8> {
         let mut capture = source
             .capture(CaptureOptions::default())
@@ -1890,11 +1903,21 @@ mod tests {
                 },
                 DriveState::After(decoder) => match decoder.push(fragment) {
                     Ok(AfterReadyStep::NeedInput { decoder, progress })
-                    | Ok(AfterReadyStep::Progress { decoder, progress })
-                    | Ok(AfterReadyStep::HistoryBegin {
-                        decoder, progress, ..
+                    | Ok(AfterReadyStep::Progress { decoder, progress }) => {
+                        assert!(progress.consumed > 0);
+                        offset += progress.consumed;
+                        DriveState::After(decoder)
+                    }
+                    Ok(AfterReadyStep::HistoryBegin {
+                        decoder,
+                        progress,
+                        count,
+                        ..
                     }) => {
                         assert!(progress.consumed > 0);
+                        if unbounded_scrollback_bytes {
+                            assert!(count > 1, "fixture must declare multiple history pages");
+                        }
                         offset += progress.consumed;
                         DriveState::After(decoder)
                     }
@@ -1968,13 +1991,19 @@ mod tests {
                 | Ok(AfterReadyStep::Progress {
                     decoder: next,
                     progress,
-                })
-                | Ok(AfterReadyStep::HistoryBegin {
+                }) => {
+                    assert!(progress.consumed > 0);
+                    offset += progress.consumed;
+                    stream = next;
+                }
+                Ok(AfterReadyStep::HistoryBegin {
                     decoder: next,
                     progress,
+                    count,
                     ..
                 }) => {
                     assert!(progress.consumed > 0);
+                    assert!(count > 1, "fixture must declare multiple history pages");
                     offset += progress.consumed;
                     stream = next;
                 }
@@ -2077,13 +2106,7 @@ mod tests {
 
     #[test]
     fn decoded_stream_accepts_live_writes_between_history_pages() {
-        let mut source = terminal(20, 4);
-        source
-            .set_scrollback_max_bytes(None)
-            .expect("remove source scrollback byte cap");
-        for row in 0..2000 {
-            source.vt_write(format!("row-{row:04}\r\n").as_bytes());
-        }
+        let mut source = multipage_terminal();
         let bytes = capture_all(&mut source);
         let live = b"live-between-decoded-history-pages\r\n";
         source.vt_write(live);
@@ -2095,13 +2118,7 @@ mod tests {
 
     #[test]
     fn decoded_stream_reset_and_resize_discard_pending_history() {
-        let mut source = terminal(20, 4);
-        source
-            .set_scrollback_max_bytes(None)
-            .expect("remove source scrollback byte cap");
-        for row in 0..2000 {
-            source.vt_write(format!("row-{row:04}\r\n").as_bytes());
-        }
+        let mut source = multipage_terminal();
         let bytes = capture_all(&mut source);
 
         let (mut reset, offset) = stream_after_history_page(&bytes);
