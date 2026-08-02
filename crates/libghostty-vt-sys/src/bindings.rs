@@ -115,6 +115,13 @@ pub struct TerminalSnapshotCaptureImpl {
 pub type TerminalSnapshotCapture = *mut TerminalSnapshotCaptureImpl;
 #[repr(C)]
 #[derive(Debug, Copy, Clone)]
+pub struct TerminalSnapshotContinuationImpl {
+    _unused: [u8; 0],
+}
+#[doc = " Opaque terminal-independent continuation of capture after READY."]
+pub type TerminalSnapshotContinuation = *mut TerminalSnapshotContinuationImpl;
+#[repr(C)]
+#[derive(Debug, Copy, Clone)]
 pub struct TerminalSnapshotDecoderImpl {
     _unused: [u8; 0],
 }
@@ -4540,6 +4547,58 @@ const _: () = {
     ["Offset of field: TerminalSnapshotCaptureOptions::max_pages"]
         [::std::mem::offset_of!(TerminalSnapshotCaptureOptions, max_pages) - 24usize];
 };
+#[doc = " Strict retained-memory and row-splitting limits for READY detachment."]
+#[repr(C)]
+#[derive(Debug, Default, Copy, Clone)]
+pub struct TerminalSnapshotDetachOptions {
+    pub size: usize,
+    pub version: u32,
+    #[doc = " Inclusive count of owned PAGE records after row splitting."]
+    pub max_pages: usize,
+    #[doc = " Inclusive bytes retained by owned records and their metadata."]
+    pub max_total_bytes: usize,
+    #[doc = " Inclusive rows represented by any owned PAGE record."]
+    pub max_rows: usize,
+}
+#[allow(clippy::unnecessary_operation, clippy::identity_op)]
+const _: () = {
+    ["Size of TerminalSnapshotDetachOptions"]
+        [::std::mem::size_of::<TerminalSnapshotDetachOptions>() - 40usize];
+    ["Alignment of TerminalSnapshotDetachOptions"]
+        [::std::mem::align_of::<TerminalSnapshotDetachOptions>() - 8usize];
+    ["Offset of field: TerminalSnapshotDetachOptions::size"]
+        [::std::mem::offset_of!(TerminalSnapshotDetachOptions, size) - 0usize];
+    ["Offset of field: TerminalSnapshotDetachOptions::version"]
+        [::std::mem::offset_of!(TerminalSnapshotDetachOptions, version) - 8usize];
+    ["Offset of field: TerminalSnapshotDetachOptions::max_pages"]
+        [::std::mem::offset_of!(TerminalSnapshotDetachOptions, max_pages) - 16usize];
+    ["Offset of field: TerminalSnapshotDetachOptions::max_total_bytes"]
+        [::std::mem::offset_of!(TerminalSnapshotDetachOptions, max_total_bytes) - 24usize];
+    ["Offset of field: TerminalSnapshotDetachOptions::max_rows"]
+        [::std::mem::offset_of!(TerminalSnapshotDetachOptions, max_rows) - 32usize];
+};
+#[doc = " Per-call delivery limits for a terminal-independent continuation."]
+#[repr(C)]
+#[derive(Debug, Default, Copy, Clone)]
+pub struct TerminalSnapshotContinuationOptions {
+    pub size: usize,
+    pub version: u32,
+    #[doc = " Inclusive rows accepted for this event. Must be nonzero."]
+    pub max_rows: usize,
+}
+#[allow(clippy::unnecessary_operation, clippy::identity_op)]
+const _: () = {
+    ["Size of TerminalSnapshotContinuationOptions"]
+        [::std::mem::size_of::<TerminalSnapshotContinuationOptions>() - 24usize];
+    ["Alignment of TerminalSnapshotContinuationOptions"]
+        [::std::mem::align_of::<TerminalSnapshotContinuationOptions>() - 8usize];
+    ["Offset of field: TerminalSnapshotContinuationOptions::size"]
+        [::std::mem::offset_of!(TerminalSnapshotContinuationOptions, size) - 0usize];
+    ["Offset of field: TerminalSnapshotContinuationOptions::version"]
+        [::std::mem::offset_of!(TerminalSnapshotContinuationOptions, version) - 8usize];
+    ["Offset of field: TerminalSnapshotContinuationOptions::max_rows"]
+        [::std::mem::offset_of!(TerminalSnapshotContinuationOptions, max_rows) - 16usize];
+};
 pub mod TerminalSnapshotCaptureEventKind {
     pub type Type = ::std::os::raw::c_uint;
     pub const RECORD: Type = 0;
@@ -4563,11 +4622,15 @@ pub struct TerminalSnapshotCaptureEvent {
     pub written: usize,
     pub required_bytes: usize,
     pub checkpoint: TerminalHistoryToken,
+    #[doc = " Exact rows represented by a HISTORY_PAGE, zero for every other event.\n These tail fields are written only when `size` includes them."]
+    pub rows: usize,
+    #[doc = " Exact row requirement on a row-budget OUT_OF_SPACE, otherwise zero."]
+    pub required_rows: usize,
 }
 #[allow(clippy::unnecessary_operation, clippy::identity_op)]
 const _: () = {
     ["Size of TerminalSnapshotCaptureEvent"]
-        [::std::mem::size_of::<TerminalSnapshotCaptureEvent>() - 88usize];
+        [::std::mem::size_of::<TerminalSnapshotCaptureEvent>() - 104usize];
     ["Alignment of TerminalSnapshotCaptureEvent"]
         [::std::mem::align_of::<TerminalSnapshotCaptureEvent>() - 8usize];
     ["Offset of field: TerminalSnapshotCaptureEvent::size"]
@@ -4590,6 +4653,10 @@ const _: () = {
         [::std::mem::offset_of!(TerminalSnapshotCaptureEvent, required_bytes) - 40usize];
     ["Offset of field: TerminalSnapshotCaptureEvent::checkpoint"]
         [::std::mem::offset_of!(TerminalSnapshotCaptureEvent, checkpoint) - 48usize];
+    ["Offset of field: TerminalSnapshotCaptureEvent::rows"]
+        [::std::mem::offset_of!(TerminalSnapshotCaptureEvent, rows) - 88usize];
+    ["Offset of field: TerminalSnapshotCaptureEvent::required_rows"]
+        [::std::mem::offset_of!(TerminalSnapshotCaptureEvent, required_rows) - 96usize];
 };
 impl Default for TerminalSnapshotCaptureEvent {
     fn default() -> Self {
@@ -4939,6 +5006,32 @@ unsafe extern "C" {
         buffer_len: usize,
         out_event: *mut TerminalSnapshotCaptureEvent,
     ) -> TerminalSnapshotStatus::Type;
+}
+unsafe extern "C" {
+    #[doc = " Atomically replace a capture which has delivered READY with a fully owned,\n terminal-independent continuation.\n\n All remaining HISTORY/PAGE records are encoded under the supplied strict\n limits before ownership changes. On failure, `*capture` is unchanged and\n `*out_continuation` is NULL. On success, `*capture` becomes NULL; the source\n terminal may immediately be mutated or freed."]
+    pub fn ghostty_terminal_snapshot_capture_detach_ready(
+        capture: *mut TerminalSnapshotCapture,
+        options: *const TerminalSnapshotDetachOptions,
+        out_continuation: *mut TerminalSnapshotContinuation,
+    ) -> TerminalSnapshotStatus::Type;
+}
+unsafe extern "C" {
+    #[doc = " Emit one complete owned post-READY record.\n\n Byte or row shortage returns OUT_OF_SPACE without advancing. The exact byte\n and row requirements are reported in `out_event`."]
+    pub fn ghostty_terminal_snapshot_continuation_next(
+        continuation: TerminalSnapshotContinuation,
+        options: *const TerminalSnapshotContinuationOptions,
+        buffer: *mut u8,
+        buffer_len: usize,
+        out_event: *mut TerminalSnapshotCaptureEvent,
+    ) -> TerminalSnapshotStatus::Type;
+}
+unsafe extern "C" {
+    pub fn ghostty_terminal_snapshot_continuation_abort(
+        continuation: TerminalSnapshotContinuation,
+    ) -> TerminalSnapshotStatus::Type;
+}
+unsafe extern "C" {
+    pub fn ghostty_terminal_snapshot_continuation_free(continuation: TerminalSnapshotContinuation);
 }
 unsafe extern "C" {
     pub fn ghostty_terminal_snapshot_capture_abort(

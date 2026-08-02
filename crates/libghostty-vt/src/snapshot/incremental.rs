@@ -319,6 +319,63 @@ impl CaptureOptions {
     }
 }
 
+/// Strict limits for converting a READY capture into owned records.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct DetachOptions {
+    /// Inclusive number of post-READY PAGE records after row splitting.
+    pub max_pages: usize,
+    /// Inclusive retained bytes for records and native record metadata.
+    pub max_total_bytes: usize,
+    /// Inclusive number of rows represented by each owned PAGE record.
+    pub max_rows: usize,
+}
+
+impl Default for DetachOptions {
+    fn default() -> Self {
+        Self {
+            max_pages: 4096,
+            max_total_bytes: 64 * 1024 * 1024,
+            max_rows: 256,
+        }
+    }
+}
+
+impl DetachOptions {
+    fn raw(self) -> ffi::TerminalSnapshotDetachOptions {
+        ffi::TerminalSnapshotDetachOptions {
+            size: std::mem::size_of::<ffi::TerminalSnapshotDetachOptions>(),
+            version: ABI_VERSION,
+            max_pages: self.max_pages,
+            max_total_bytes: self.max_total_bytes,
+            max_rows: self.max_rows,
+        }
+    }
+}
+
+/// Row budget applied to one owned continuation delivery attempt.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ContinuationOptions {
+    /// Inclusive number of HISTORY_PAGE rows accepted by this request.
+    pub max_rows: usize,
+}
+
+impl Default for ContinuationOptions {
+    fn default() -> Self {
+        Self { max_rows: 256 }
+    }
+}
+
+impl ContinuationOptions {
+    fn raw(self) -> ffi::TerminalSnapshotContinuationOptions {
+        ffi::TerminalSnapshotContinuationOptions {
+            size: std::mem::size_of::<ffi::TerminalSnapshotContinuationOptions>(),
+            version: ABI_VERSION,
+            max_rows: self.max_rows,
+        }
+    }
+}
+
+
 /// Metadata for one complete opaque capture record.
 #[derive(Debug)]
 pub enum CaptureEventKind {
@@ -356,9 +413,57 @@ pub struct CaptureEvent<'buffer> {
     pub kind: CaptureEventKind,
     /// Snapshot envelope version emitted by this capture.
     pub codec_version: u16,
+    /// Rows represented by this HISTORY_PAGE, zero for every other event.
+    pub rows: usize,
     /// Complete opaque record bytes.
     pub record: &'buffer [u8],
 }
+
+fn empty_capture_event() -> ffi::TerminalSnapshotCaptureEvent {
+    ffi::TerminalSnapshotCaptureEvent {
+        size: std::mem::size_of::<ffi::TerminalSnapshotCaptureEvent>(),
+        version: ABI_VERSION,
+        ..Default::default()
+    }
+}
+
+fn capture_event<'buffer>(
+    status: ffi::TerminalSnapshotStatus::Type,
+    raw: ffi::TerminalSnapshotCaptureEvent,
+    buffer: &'buffer mut [u8],
+) -> Result<CaptureEvent<'buffer>> {
+    from_status(status, raw.required_bytes, raw.required_rows)?;
+    if raw.written > buffer.len() || raw.required_bytes != raw.written {
+        return Err(Error::InvalidState);
+    }
+    let kind = match raw.kind {
+        ffi::TerminalSnapshotCaptureEventKind::RECORD => CaptureEventKind::Record,
+        ffi::TerminalSnapshotCaptureEventKind::READY => CaptureEventKind::Ready {
+            checkpoint: CheckpointToken::new(raw.checkpoint),
+        },
+        ffi::TerminalSnapshotCaptureEventKind::HISTORY_BEGIN => CaptureEventKind::HistoryBegin {
+            screen: ScreenKey(raw.screen_key),
+            count: raw.count,
+        },
+        ffi::TerminalSnapshotCaptureEventKind::HISTORY_PAGE => CaptureEventKind::HistoryPage {
+            screen: ScreenKey(raw.screen_key),
+            index: raw.index,
+            count: raw.count,
+        },
+        ffi::TerminalSnapshotCaptureEventKind::FINISH => CaptureEventKind::Finish,
+        _ => return Err(Error::InvalidState),
+    };
+    if !matches!(kind, CaptureEventKind::HistoryPage { .. }) && raw.rows != 0 {
+        return Err(Error::InvalidState);
+    }
+    Ok(CaptureEvent {
+        kind,
+        codec_version: raw.codec_version,
+        rows: raw.rows,
+        record: &buffer[..raw.written],
+    })
+}
+
 
 /// RAII incremental capture borrowing its terminal against mutation.
 #[derive(Debug)]
@@ -376,11 +481,7 @@ impl<'terminal, 'alloc> Capture<'terminal, 'alloc> {
     /// advance capture, so retrying with a sufficiently large buffer observes
     /// the same event and bytes.
     pub fn next<'buffer>(&mut self, buffer: &'buffer mut [u8]) -> Result<CaptureEvent<'buffer>> {
-        let mut raw = ffi::TerminalSnapshotCaptureEvent {
-            size: std::mem::size_of::<ffi::TerminalSnapshotCaptureEvent>(),
-            version: ABI_VERSION,
-            ..Default::default()
-        };
+        let mut raw = empty_capture_event();
         let status = unsafe {
             ffi::ghostty_terminal_snapshot_capture_next(
                 self.inner.as_raw(),
@@ -389,35 +490,46 @@ impl<'terminal, 'alloc> Capture<'terminal, 'alloc> {
                 &raw mut raw,
             )
         };
-        from_status(status, raw.required_bytes, 0)?;
-        if raw.written > buffer.len() || raw.required_bytes != raw.written {
-            return Err(Error::InvalidState);
-        }
-        let kind = match raw.kind {
-            ffi::TerminalSnapshotCaptureEventKind::RECORD => CaptureEventKind::Record,
-            ffi::TerminalSnapshotCaptureEventKind::READY => CaptureEventKind::Ready {
-                checkpoint: CheckpointToken::new(raw.checkpoint),
-            },
-            ffi::TerminalSnapshotCaptureEventKind::HISTORY_BEGIN => {
-                CaptureEventKind::HistoryBegin {
-                    screen: ScreenKey(raw.screen_key),
-                    count: raw.count,
-                }
-            }
-            ffi::TerminalSnapshotCaptureEventKind::HISTORY_PAGE => CaptureEventKind::HistoryPage {
-                screen: ScreenKey(raw.screen_key),
-                index: raw.index,
-                count: raw.count,
-            },
-            ffi::TerminalSnapshotCaptureEventKind::FINISH => CaptureEventKind::Finish,
-            _ => return Err(Error::InvalidState),
+        capture_event(status, raw, buffer)
+    }
+
+    /// Eagerly own all records after an already-delivered READY event.
+    ///
+    /// This transition is transactional. Allocation or limit failure returns
+    /// the original capture so the same READY cut can be retried or aborted.
+    /// On success, the returned continuation carries no terminal lifetime: the
+    /// source terminal can be mutated or dropped before [`CaptureContinuation::next`] resumes.
+    pub fn detach_ready(
+        mut self,
+        options: DetachOptions,
+    ) -> Result<CaptureContinuation<'alloc>, CaptureDetachFailure<Self>> {
+        let mut capture = self.inner.as_raw();
+        let mut continuation = std::ptr::null_mut();
+        let raw_options = options.raw();
+        let status = unsafe {
+            ffi::ghostty_terminal_snapshot_capture_detach_ready(
+                &mut capture,
+                &raw_options,
+                &mut continuation,
+            )
         };
-        Ok(CaptureEvent {
-            kind,
-            codec_version: raw.codec_version,
-            record: &buffer[..raw.written],
+        if let Err(error) = from_status(status, 0, 0) {
+            return Err(CaptureDetachFailure {
+                error,
+                capture: self,
+            });
+        }
+        self.active = false;
+        let inner = Object::new(continuation)
+            .expect("Ghostty returned success with a null snapshot continuation");
+        std::mem::forget(self);
+        Ok(CaptureContinuation {
+            inner,
+            active: true,
+            _not_send_or_sync: PhantomData,
         })
     }
+
 
     /// Abort capture and release its terminal borrow.
     pub fn abort(mut self) -> Result<()> {
@@ -438,6 +550,70 @@ impl Drop for Capture<'_, '_> {
         unsafe { ffi::ghostty_terminal_snapshot_capture_free(self.inner.as_raw()) };
     }
 }
+
+/// Transactional detach failure carrying the still-usable original capture.
+#[derive(Debug)]
+pub struct CaptureDetachFailure<C> {
+    /// Exact native error.
+    pub error: Error,
+    /// Capture at the unchanged READY boundary.
+    pub capture: C,
+}
+
+/// Terminal-independent owner of all snapshot records after READY.
+#[derive(Debug)]
+pub struct CaptureContinuation<'alloc> {
+    inner: Object<'alloc, ffi::TerminalSnapshotContinuationImpl>,
+    active: bool,
+    _not_send_or_sync: PhantomData<Rc<()>>,
+}
+
+impl<'alloc> CaptureContinuation<'alloc> {
+    /// Emit one complete owned record into `buffer`.
+    ///
+    /// Byte or row shortage is nonadvancing. [`Error::OutOfSpace`] contains
+    /// exact requirements, while [`CaptureEvent::rows`] declares the accepted
+    /// row charge for every HISTORY_PAGE.
+    pub fn next<'buffer>(
+        &mut self,
+        options: ContinuationOptions,
+        buffer: &'buffer mut [u8],
+    ) -> Result<CaptureEvent<'buffer>> {
+        let raw_options = options.raw();
+        let mut raw = empty_capture_event();
+        let status = unsafe {
+            ffi::ghostty_terminal_snapshot_continuation_next(
+                self.inner.as_raw(),
+                &raw_options,
+                buffer.as_mut_ptr(),
+                buffer.len(),
+                &raw mut raw,
+            )
+        };
+        capture_event(status, raw, buffer)
+    }
+
+    /// Abort without emitting remaining history or FINISH.
+    pub fn abort(mut self) -> Result<()> {
+        self.active = false;
+        from_status(
+            unsafe { ffi::ghostty_terminal_snapshot_continuation_abort(self.inner.as_raw()) },
+            0,
+            0,
+        )
+    }
+}
+
+impl Drop for CaptureContinuation<'_> {
+    fn drop(&mut self) {
+        if self.active {
+            let _ =
+                unsafe { ffi::ghostty_terminal_snapshot_continuation_abort(self.inner.as_raw()) };
+        }
+        unsafe { ffi::ghostty_terminal_snapshot_continuation_free(self.inner.as_raw()) };
+    }
+}
+
 
 impl<'terminal_alloc: 'cb, 'cb> Terminal<'terminal_alloc, 'cb> {
     /// Begin bounded incremental capture using Ghostty's default allocator.
@@ -984,6 +1160,12 @@ impl<'alloc: 'cb, 'cb> DecodedStream<'alloc, 'cb> {
         Ok(())
     }
 
+    /// Set the decoded terminal's physical scrollback line limit without moving it.
+    pub fn set_scrollback_max_lines(&mut self, max: usize) -> crate::error::Result<()> {
+        self.terminal.set_scrollback_max_lines(max)?;
+        Ok(())
+    }
+
     /// Consume an arbitrary fragment after READY.
     pub fn push(
         self,
@@ -1522,6 +1704,15 @@ impl<'terminal_alloc: 'cb, 'cb, 'lease_alloc>
         Ok(())
     }
 
+    /// Set the owned terminal's physical scrollback line limit without moving it.
+    pub fn set_scrollback_max_lines(&mut self, max: usize) -> crate::error::Result<()> {
+        self.terminal
+            .as_mut()
+            .expect("live history cursor always owns its terminal")
+            .set_scrollback_max_lines(max)?;
+        Ok(())
+    }
+
     /// Resize the owned terminal, explicitly invalidating this history cut.
     pub fn resize(
         &mut self,
@@ -1845,6 +2036,15 @@ impl<'terminal_alloc: 'cb, 'cb, 'lease_alloc> LiveHistorySet<'terminal_alloc, 'c
             .as_mut()
             .expect("live history set always owns its terminal")
             .vt_write(data);
+    }
+
+    /// Set the live terminal's physical scrollback line limit.
+    pub fn set_scrollback_max_lines(&mut self, max: usize) -> crate::error::Result<()> {
+        self.terminal
+            .as_mut()
+            .expect("live history set always owns its terminal")
+            .set_scrollback_max_lines(max)?;
+        Ok(())
     }
 
     /// Scroll the live terminal viewport without exposing terminal ownership.
@@ -2306,6 +2506,9 @@ mod tests {
         source
             .set_scrollback_max_bytes(None)
             .expect("remove source scrollback byte cap");
+        source
+            .set_scrollback_max_lines(4000)
+            .expect("raise source scrollback line cap");
         let full_width_content = [b'x'; 500];
         for _ in 0..2000 {
             source.vt_write(&full_width_content);
@@ -2349,6 +2552,119 @@ mod tests {
         }
         all
     }
+
+    #[test]
+    fn detached_capture_is_terminal_independent_and_row_bounded() {
+        let mut source = terminal(80, 4);
+        source
+            .set_scrollback_max_bytes(None)
+            .expect("unbounded source scrollback");
+        for _ in 0..1000 {
+            source.vt_write(b"\r\n");
+        }
+        let control_bytes = source.encode_snapshot().expect("control snapshot");
+        let control = Terminal::decode_snapshot(&control_bytes)
+            .expect("control decode")
+            .terminal;
+
+        let capture_options = CaptureOptions::default();
+        let mut capture = source
+            .capture(capture_options)
+            .expect("capture construction");
+        let mut snapshot_bytes = Vec::new();
+        loop {
+            let required = match capture.next(&mut []) {
+                Err(Error::OutOfSpace {
+                    required_bytes,
+                    required_rows: 0,
+                }) => required_bytes,
+                other => panic!("capture byte probe: {other:?}"),
+            };
+            let mut record = vec![0; required];
+            let event = capture.next(&mut record).expect("capture record");
+            let ready = matches!(event.kind, CaptureEventKind::Ready { .. });
+            assert_eq!(event.rows, 0);
+            snapshot_bytes.extend_from_slice(event.record);
+            if ready {
+                break;
+            }
+        }
+
+        let failed = capture
+            .detach_ready(DetachOptions {
+                max_total_bytes: 1,
+                ..DetachOptions::default()
+            })
+            .expect_err("retained-byte limit must be transactional");
+        assert_eq!(failed.error, Error::LimitExceeded);
+        let mut continuation = failed
+            .capture
+            .detach_ready(DetachOptions {
+                max_pages: 4096,
+                max_total_bytes: 64 * 1024 * 1024,
+                max_rows: 7,
+            })
+            .expect("READY detachment");
+
+        source.vt_write(b"live-after-ready");
+        source.resize(81, 5, 0, 0).expect("source resize after detach");
+        drop(source);
+
+        let mut saw_row_gate = false;
+        let mut history_rows = 0;
+        loop {
+            let mut record = vec![0; capture_options.max_record_bytes];
+            let event = match continuation.next(
+                ContinuationOptions { max_rows: 1 },
+                &mut record,
+            ) {
+                Ok(event) => event,
+                Err(Error::OutOfSpace {
+                    required_bytes,
+                    required_rows,
+                }) if required_rows > 1 => {
+                    saw_row_gate = true;
+                    assert!(required_bytes <= record.len());
+                    assert_eq!(
+                        continuation
+                            .next(ContinuationOptions { max_rows: 1 }, &mut record)
+                            .unwrap_err(),
+                        Error::OutOfSpace {
+                            required_bytes,
+                            required_rows,
+                        },
+                        "row shortage must not advance"
+                    );
+                    let event = continuation
+                        .next(ContinuationOptions { max_rows: 7 }, &mut record)
+                        .expect("row-budget retry");
+                    assert_eq!(event.rows, required_rows);
+                    event
+                }
+                Err(other) => panic!("owned continuation delivery: {other:?}"),
+            };
+            assert!(event.rows <= 7);
+            if matches!(event.kind, CaptureEventKind::HistoryPage { .. }) {
+                assert!(event.rows > 0);
+                history_rows += event.rows;
+            } else {
+                assert_eq!(event.rows, 0);
+            }
+            let finished = matches!(event.kind, CaptureEventKind::Finish);
+            snapshot_bytes.extend_from_slice(event.record);
+            if finished {
+                break;
+            }
+        }
+        assert!(saw_row_gate);
+        assert!(history_rows > 500, "many small-byte blank rows were charged");
+
+        let decoded = Terminal::decode_snapshot(&snapshot_bytes)
+            .expect("detached snapshot decode")
+            .terminal;
+        assert_semantically_equal(&control, &decoded);
+    }
+
 
     enum DriveState {
         Before(Decoder<'static>),
@@ -2395,6 +2711,9 @@ mod tests {
                             stream
                                 .set_scrollback_max_bytes(None)
                                 .expect("remove decoded scrollback byte cap");
+                            stream
+                                .set_scrollback_max_lines(4000)
+                                .expect("forward decoded scrollback line cap");
                         }
                         DriveState::After(stream)
                     }
@@ -2475,6 +2794,9 @@ mod tests {
                     decoded
                         .set_scrollback_max_bytes(None)
                         .expect("remove decoded scrollback byte cap");
+                    decoded
+                        .set_scrollback_max_lines(4000)
+                        .expect("forward decoded scrollback line cap");
                     break decoded;
                 }
                 Err(error) => panic!("decode before READY failed: {error}"),
@@ -2791,6 +3113,8 @@ mod tests {
         let mut live = source
             .into_live_history_cursor(ScreenKey::PRIMARY)
             .expect("owned live cursor");
+        live.set_scrollback_max_lines(1000)
+            .expect("forward owned scrollback line cap");
         let checkpoint = *live.checkpoint().as_bytes();
         let capability = *live.capability().as_bytes();
         assert_eq!(live.checkpoint().as_bytes(), &checkpoint);

@@ -783,6 +783,15 @@ impl<'alloc: 'cb, 'cb> Terminal<'alloc, 'cb> {
         Ok(self)
     }
 
+    /// Set the maximum number of physical scrollback lines.
+    ///
+    /// This is an approximate page-granularity limit used alongside the
+    /// configured byte limit.
+    pub fn set_scrollback_max_lines(&mut self, max: usize) -> Result<&mut Self> {
+        self.set(Opt::SCROLLBACK_MAX_LINES, &max)?;
+        Ok(self)
+    }
+
     /// Enable or disable Glyph Protocol APC handling.
     ///
     /// Disabling the protocol makes the terminal ignore Glyph Protocol APC
@@ -1958,6 +1967,30 @@ mod tests {
             max_scrollback: 100,
         })
         .expect("terminal should initialize")
+    }
+
+    #[test]
+    fn scrollback_line_limit_forwards_and_prunes() {
+        fn populated_total(max_lines: usize) -> u64 {
+            let mut terminal = tiny_terminal();
+            terminal
+                .set_scrollback_max_bytes(None)
+                .expect("remove byte cap");
+            terminal
+                .set_scrollback_max_lines(max_lines)
+                .expect("set line cap");
+            for _ in 0..4000 {
+                terminal.vt_write(b"\r\n");
+            }
+            terminal.scrollbar().expect("scrollbar").total
+        }
+
+        let capped = populated_total(8);
+        let generous = populated_total(4000);
+        assert!(
+            capped < generous,
+            "line cap must prune history: capped={capped}, generous={generous}"
+        );
     }
 
     fn codepoint_at_tracked_ref(terminal: &Terminal<'_, '_>, tracked: &TrackedGridRef) -> u32 {
