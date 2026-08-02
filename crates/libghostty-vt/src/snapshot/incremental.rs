@@ -9,7 +9,7 @@ use std::{fmt, marker::PhantomData, ptr::NonNull, rc::Rc};
 use crate::{
     alloc::{Allocator, Object},
     ffi,
-    terminal::Terminal,
+    terminal::{ScrollViewport, Terminal},
 };
 
 const ABI_VERSION: u32 = ffi::TERMINAL_SNAPSHOT_ABI_VERSION;
@@ -913,6 +913,11 @@ impl<'alloc: 'cb, 'cb> DecodedStream<'alloc, 'cb> {
     /// Process live VT bytes while preserving decoder ownership.
     pub fn vt_write(&mut self, data: &[u8]) {
         self.terminal.vt_write(data);
+    }
+
+    /// Scroll the live decoded viewport without exposing terminal ownership.
+    pub fn scroll_viewport(&mut self, scroll: ScrollViewport) {
+        self.terminal.scroll_viewport(scroll);
     }
 
     /// Resize the decoded terminal. Any later snapshot history pages are
