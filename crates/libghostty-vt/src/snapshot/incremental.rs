@@ -3181,9 +3181,9 @@ mod tests {
                 .into_live_history_cursor_with_alloc(&allocator, ScreenKey::PRIMARY)
                 .expect("allocator-owned live cursor");
             assert_eq!(state.active.get(), 2);
-            let terminal = live.into_terminal();
+            let recovered_terminal = live.into_terminal();
             assert_eq!(state.active.get(), 0);
-            drop(terminal);
+            drop(recovered_terminal);
 
             let mut set = terminal(20, 4)
                 .into_live_history_set_with_alloc(&allocator, 4)
