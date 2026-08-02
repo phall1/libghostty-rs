@@ -2590,15 +2590,17 @@ mod tests {
             }
         }
 
-        let failed = capture
+        let CaptureDetachFailure {
+            error,
+            capture,
+        } = capture
             .detach_ready(DetachOptions {
                 max_total_bytes: 1,
                 ..DetachOptions::default()
             })
             .expect_err("retained-byte limit must be transactional");
-        assert_eq!(failed.error, Error::LimitExceeded);
-        let mut continuation = failed
-            .capture
+        assert_eq!(error, Error::LimitExceeded);
+        let mut continuation = capture
             .detach_ready(DetachOptions {
                 max_pages: 4096,
                 max_total_bytes: 64 * 1024 * 1024,
