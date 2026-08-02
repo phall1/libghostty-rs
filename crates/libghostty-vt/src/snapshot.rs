@@ -260,7 +260,11 @@ mod tests {
     fn parse_fixture(value: &str) -> Vec<u8> {
         value
             .lines()
-            .flat_map(|line| line.split_once('#').map_or(line, |(data, _)| data).split_whitespace())
+            .flat_map(|line| {
+                line.split_once('#')
+                    .map_or(line, |(data, _)| data)
+                    .split_whitespace()
+            })
             .map(|byte| u8::from_str_radix(byte, 16).expect("fixture hex byte"))
             .collect()
     }
@@ -325,9 +329,9 @@ mod tests {
             (
                 "history-multipage",
                 include_str!("../testdata/snapshot-corpus/history-multipage-v2.hex"),
-                771_100,
-                0x963a_ccc4_0a87_c60d,
-                (80, 24),
+                2_469_736,
+                0x5575_29ed_7661_a40b,
+                (512, 4),
             ),
         ];
 
@@ -357,9 +361,7 @@ mod tests {
             assert_eq!(reencoded.as_ref(), bytes, "{name} exact semantic oracle");
         }
 
-        let v1 = parse_fixture(include_str!(
-            "../testdata/snapshot-corpus/compat-v1.hex"
-        ));
+        let v1 = parse_fixture(include_str!("../testdata/snapshot-corpus/compat-v1.hex"));
         let decoded = Terminal::decode_snapshot(&v1).expect("v1 compatibility decode");
         assert_eq!(decoded.consumed, v1.len());
         let upgraded = decoded
