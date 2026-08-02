@@ -111,6 +111,22 @@ const PREFIXES: &[(&str, &str)] = &[
         "GhosttySelectionGestureEventOption",
         "GHOSTTY_SELECTION_GESTURE_EVENT_OPT",
     ),
+    (
+        "GhosttyTerminalSnapshotStatus",
+        "GHOSTTY_TERMINAL_SNAPSHOT_STATUS",
+    ),
+    (
+        "GhosttyTerminalSnapshotCaptureEventKind",
+        "GHOSTTY_TERMINAL_SNAPSHOT_CAPTURE",
+    ),
+    (
+        "GhosttyTerminalSnapshotDecodeEventKind",
+        "GHOSTTY_TERMINAL_SNAPSHOT_DECODE",
+    ),
+    (
+        "GhosttyTerminalHistoryEventKind",
+        "GHOSTTY_TERMINAL_HISTORY",
+    ),
 ];
 
 #[derive(Debug)]

@@ -79,6 +79,8 @@ pub const KITTY_KEY_REPORT_ALTERNATES: u8 = 4;
 pub const KITTY_KEY_REPORT_ALL: u8 = 8;
 pub const KITTY_KEY_REPORT_ASSOCIATED: u8 = 16;
 pub const KITTY_KEY_ALL: u8 = 31;
+pub const TERMINAL_SNAPSHOT_ABI_VERSION: u32 = 1;
+pub const TERMINAL_HISTORY_TOKEN_BYTES: u32 = 32;
 pub mod Result {
     #[doc = " Result codes for libghostty-vt operations."]
     pub type Type = ::std::os::raw::c_int;
@@ -92,7 +94,9 @@ pub mod Result {
     pub const OUT_OF_SPACE: Type = -3;
     #[doc = " The requested value has no value"]
     pub const NO_VALUE: Type = -4;
-    #[doc = " The requested value has no value"]
+    #[doc = " Operation requires semantic state unsupported by this representation"]
+    pub const UNSUPPORTED_FEATURE: Type = -5;
+    #[doc = " Operation requires semantic state unsupported by this representation"]
     pub const RESULT_MAX_VALUE: Type = 2147483647;
 }
 #[repr(C)]
@@ -102,6 +106,41 @@ pub struct TerminalImpl {
 }
 #[doc = " Opaque handle to a terminal instance.\n"]
 pub type Terminal = *mut TerminalImpl;
+#[repr(C)]
+#[derive(Debug, Copy, Clone)]
+pub struct TerminalSnapshotCaptureImpl {
+    _unused: [u8; 0],
+}
+#[doc = " Opaque incremental snapshot capture state."]
+pub type TerminalSnapshotCapture = *mut TerminalSnapshotCaptureImpl;
+#[repr(C)]
+#[derive(Debug, Copy, Clone)]
+pub struct TerminalSnapshotDecoderImpl {
+    _unused: [u8; 0],
+}
+#[doc = " Opaque incremental snapshot decoder state."]
+pub type TerminalSnapshotDecoder = *mut TerminalSnapshotDecoderImpl;
+#[repr(C)]
+#[derive(Debug, Copy, Clone)]
+pub struct TerminalHistoryLeaseImpl {
+    _unused: [u8; 0],
+}
+#[doc = " Opaque generation-bound terminal history lease."]
+pub type TerminalHistoryLease = *mut TerminalHistoryLeaseImpl;
+#[repr(C)]
+#[derive(Debug, Copy, Clone)]
+pub struct TerminalHistoryCursorImpl {
+    _unused: [u8; 0],
+}
+#[doc = " Opaque newest-to-oldest terminal history cursor."]
+pub type TerminalHistoryCursor = *mut TerminalHistoryCursorImpl;
+#[repr(C)]
+#[derive(Debug, Copy, Clone)]
+pub struct TerminalHistoryImporterImpl {
+    _unused: [u8; 0],
+}
+#[doc = " Opaque transactional terminal history importer."]
+pub type TerminalHistoryImporter = *mut TerminalHistoryImporterImpl;
 #[repr(C)]
 #[derive(Debug, Copy, Clone)]
 pub struct TrackedGridRefImpl {
@@ -2264,6 +2303,103 @@ pub type TerminalClipboardWriteFn = ::std::option::Option<
         write: *const ClipboardWrite,
     ) -> ClipboardWriteResult::Type,
 >;
+#[doc = " A request to show a desktop notification.\n\n This is a sized struct. The callback must only access fields present in the\n size reported by `size`. Both strings are borrowed and valid only for the\n duration of the callback.\n"]
+#[repr(C)]
+#[derive(Debug, Copy, Clone)]
+pub struct TerminalDesktopNotification {
+    #[doc = " Size of this struct in bytes."]
+    pub size: usize,
+    #[doc = " Notification title, or an empty string when the protocol omits it."]
+    pub title: String,
+    #[doc = " Notification body."]
+    pub body: String,
+}
+#[allow(clippy::unnecessary_operation, clippy::identity_op)]
+const _: () = {
+    ["Size of TerminalDesktopNotification"]
+        [::std::mem::size_of::<TerminalDesktopNotification>() - 40usize];
+    ["Alignment of TerminalDesktopNotification"]
+        [::std::mem::align_of::<TerminalDesktopNotification>() - 8usize];
+    ["Offset of field: TerminalDesktopNotification::size"]
+        [::std::mem::offset_of!(TerminalDesktopNotification, size) - 0usize];
+    ["Offset of field: TerminalDesktopNotification::title"]
+        [::std::mem::offset_of!(TerminalDesktopNotification, title) - 8usize];
+    ["Offset of field: TerminalDesktopNotification::body"]
+        [::std::mem::offset_of!(TerminalDesktopNotification, body) - 24usize];
+};
+impl Default for TerminalDesktopNotification {
+    fn default() -> Self {
+        let mut s = ::std::mem::MaybeUninit::<Self>::uninit();
+        unsafe {
+            ::std::ptr::write_bytes(s.as_mut_ptr(), 0, 1);
+            s.assume_init()
+        }
+    }
+}
+#[doc = " Callback function type for desktop notifications.\n\n Called synchronously when the terminal receives OSC 9 or OSC 777.\n\n"]
+pub type TerminalDesktopNotificationFn = ::std::option::Option<
+    unsafe extern "C" fn(
+        terminal: Terminal,
+        userdata: *mut ::std::os::raw::c_void,
+        notification: *const TerminalDesktopNotification,
+    ),
+>;
+pub mod TerminalProgressState {
+    #[doc = " State of a terminal progress report.\n"]
+    pub type Type = ::std::os::raw::c_uint;
+    #[doc = " Remove any visible progress indication."]
+    pub const REMOVE: Type = 0;
+    #[doc = " Show determinate progress."]
+    pub const SET: Type = 1;
+    #[doc = " Show a failed progress state."]
+    pub const ERROR: Type = 2;
+    #[doc = " Show indeterminate progress."]
+    pub const INDETERMINATE: Type = 3;
+    #[doc = " Show paused progress."]
+    pub const PAUSE: Type = 4;
+    #[doc = " Show paused progress."]
+    pub const MAX_VALUE: Type = 2147483647;
+}
+#[doc = " A progress report emitted by the running program.\n\n This is a sized struct. The callback must only access fields present in the\n size reported by `size`.\n"]
+#[repr(C)]
+#[derive(Debug, Copy, Clone)]
+pub struct TerminalProgressReport {
+    #[doc = " Size of this struct in bytes."]
+    pub size: usize,
+    #[doc = " Literal progress state reported by the running program."]
+    pub state: TerminalProgressState::Type,
+    #[doc = " Progress percentage from 0 through 100, or -1 when omitted."]
+    pub progress: i8,
+}
+#[allow(clippy::unnecessary_operation, clippy::identity_op)]
+const _: () = {
+    ["Size of TerminalProgressReport"][::std::mem::size_of::<TerminalProgressReport>() - 16usize];
+    ["Alignment of TerminalProgressReport"]
+        [::std::mem::align_of::<TerminalProgressReport>() - 8usize];
+    ["Offset of field: TerminalProgressReport::size"]
+        [::std::mem::offset_of!(TerminalProgressReport, size) - 0usize];
+    ["Offset of field: TerminalProgressReport::state"]
+        [::std::mem::offset_of!(TerminalProgressReport, state) - 8usize];
+    ["Offset of field: TerminalProgressReport::progress"]
+        [::std::mem::offset_of!(TerminalProgressReport, progress) - 12usize];
+};
+impl Default for TerminalProgressReport {
+    fn default() -> Self {
+        let mut s = ::std::mem::MaybeUninit::<Self>::uninit();
+        unsafe {
+            ::std::ptr::write_bytes(s.as_mut_ptr(), 0, 1);
+            s.assume_init()
+        }
+    }
+}
+#[doc = " Callback function type for progress reports.\n\n Called synchronously when the terminal receives OSC 9;4.\n\n"]
+pub type TerminalProgressReportFn = ::std::option::Option<
+    unsafe extern "C" fn(
+        terminal: Terminal,
+        userdata: *mut ::std::os::raw::c_void,
+        report: *const TerminalProgressReport,
+    ),
+>;
 #[doc = " Callback function type for color scheme queries (CSI ? 996 n).\n\n Called when the terminal receives a color scheme device status report\n query. Return true and fill *out_scheme with the current color scheme,\n or return false to silently ignore the query.\n\n"]
 pub type TerminalColorSchemeFn = ::std::option::Option<
     unsafe extern "C" fn(
@@ -2370,11 +2506,15 @@ pub mod TerminalOption {
     pub const PWD_CHANGED: Type = 25;
     #[doc = " Callback invoked when the running program performs a clipboard write.\n OSC 52 and iTerm2 OSC 1337 Copy writes are normalized to an atomic set\n of decoded MIME representations. Set to NULL to ignore clipboard writes.\n Clipboard read requests are always ignored; see\n GhosttyTerminalClipboardWriteFn.\n\n Input type: GhosttyTerminalClipboardWriteFn"]
     pub const CLIPBOARD_WRITE: Type = 26;
-    #[doc = " Set the maximum scrollback allocation in bytes.\n\n A value of zero disables scrollback and erases retained history.\n A NULL value pointer removes the byte limit.\n\n Input type: size_t*"]
+    #[doc = " Set the maximum scrollback allocation in bytes.\n\n This is an estimate. Internally, libghostty only prunes bytes up\n to a \"page\"-granularity. A page is the minimum allocated unit of\n grid space within Ghostty. A page at the time of writing these docs\n is about 400KB, so the byte limit will be within this delta.\n\n This works alongside the line limit configuration. If both are set,\n the first-reached limit is used first. Both limits are dependent\n on external state (byte limit can be reached with less lines if\n more styles are used for example, line limit can be reached with\n a narrower terminal viewport). So, they are useful together.\n\n Lowering the limit immediately removes eligible complete historical\n pages. A value of zero disables scrollback and erases retained history.\n A NULL value pointer removes the byte limit.\n\n Input type: size_t*"]
     pub const SCROLLBACK_MAX_BYTES: Type = 27;
-    #[doc = " Set the maximum number of physical lines retained in scrollback.\n\n A NULL value pointer removes the line limit.\n\n Input type: size_t*"]
+    #[doc = " Set the maximum number of physical lines retained in scrollback.\n\n This is an estimate. Internally, libghostty only prunes lines up\n to a \"page\"-granularity. A page is the minimum allocated unit of\n grid space within Ghostty. As a result, the actual available scrollback\n lines will almost always be higher than configured. The magnitude\n of the difference depends on the number of used styles, graphemes, etc.\n since the row-count in a page is dynamic based on that. In general,\n it ranges from dozens to a hundred or so lines.\n\n This works alongside the line limit configuration. If both are set,\n the first-reached limit is used first. Both limits are dependent\n on external state (byte limit can be reached with less lines if\n more styles are used for example, line limit can be reached with\n a narrower terminal viewport). So, they are useful together.\n\n Lowering the limit immediately removes eligible complete historical\n pages. A NULL value pointer removes the line limit.\n\n Input type: size_t*"]
     pub const SCROLLBACK_MAX_LINES: Type = 28;
-    #[doc = " Callback invoked when the running program performs a clipboard write.\n OSC 52 and iTerm2 OSC 1337 Copy writes are normalized to an atomic set\n of decoded MIME representations. Set to NULL to ignore clipboard writes.\n Clipboard read requests are always ignored; see\n GhosttyTerminalClipboardWriteFn.\n\n Input type: GhosttyTerminalClipboardWriteFn"]
+    #[doc = " Callback invoked when the running program requests a desktop\n notification via OSC 9 or OSC 777. Set to NULL to ignore desktop\n notification requests.\n\n Input type: GhosttyTerminalDesktopNotificationFn"]
+    pub const DESKTOP_NOTIFICATION: Type = 29;
+    #[doc = " Callback invoked when the running program reports progress via OSC 9;4.\n Set to NULL to ignore progress reports.\n\n Input type: GhosttyTerminalProgressReportFn"]
+    pub const PROGRESS_REPORT: Type = 30;
+    #[doc = " Callback invoked when the running program reports progress via OSC 9;4.\n Set to NULL to ignore progress reports.\n\n Input type: GhosttyTerminalProgressReportFn"]
     pub const MAX_VALUE: Type = 2147483647;
 }
 pub mod TerminalData {
@@ -2448,11 +2588,15 @@ pub mod TerminalData {
     pub const VIEWPORT_ACTIVE: Type = 32;
     #[doc = " Whether VT processing encountered a non-gracefully handled error that may\n have prevented a terminal-owned semantic update.\n\n Processing remains best-effort, and ghostty_terminal_reset() does not\n clear it. Gracefully handled protocol failures, configured limits,\n malformed or unsupported input, and failures limited to external effects\n or query responses do not set it.\n\n This can't currently be unset. This is purely informational to consumers\n if there was some error that happened at some point during VT processing.\n\n Output type: bool *"]
     pub const VT_PROCESSING_ERROR: Type = 33;
-    #[doc = " Whether VT processing encountered a non-gracefully handled error that may\n have prevented a terminal-owned semantic update.\n\n Processing remains best-effort, and ghostty_terminal_reset() does not\n clear it. Gracefully handled protocol failures, configured limits,\n malformed or unsupported input, and failures limited to external effects\n or query responses do not set it.\n\n This can't currently be unset. This is purely informational to consumers\n if there was some error that happened at some point during VT processing.\n\n Output type: bool *"]
+    #[doc = " The configured maximum scrollback allocation in bytes.\n\n This always reports the primary screen's configured value, including\n while an alternate screen is active. Returns GHOSTTY_NO_VALUE when the\n configured byte limit is unlimited.\n\n Output type: size_t *"]
+    pub const SCROLLBACK_MAX_BYTES: Type = 34;
+    #[doc = " The configured maximum number of physical scrollback lines.\n\n This always reports the primary screen's configured value, including\n while an alternate screen is active. Returns GHOSTTY_NO_VALUE when the\n configured line limit is unlimited.\n\n Output type: size_t *"]
+    pub const SCROLLBACK_MAX_LINES: Type = 35;
+    #[doc = " The configured maximum number of physical scrollback lines.\n\n This always reports the primary screen's configured value, including\n while an alternate screen is active. Returns GHOSTTY_NO_VALUE when the\n configured line limit is unlimited.\n\n Output type: size_t *"]
     pub const MAX_VALUE: Type = 2147483647;
 }
 unsafe extern "C" {
-    #[doc = " Create a new terminal instance.\n\n The terminal starts with reasonable defaults. Use ghostty_terminal_set()\n to change options before processing terminal input.\n\n"]
+    #[doc = " Create a new terminal instance.\n\n The terminal starts with various reasonable defaults e.g. around\n scrollback limits. Use ghostty_terminal_set() to change any options\n prior to using the terminal.\n\n"]
     pub fn ghostty_terminal_new(
         allocator: *const Allocator,
         terminal: *mut Terminal,
@@ -2479,7 +2623,7 @@ unsafe extern "C" {
     ) -> Result::Type;
 }
 unsafe extern "C" {
-    #[doc = " Set an option on the terminal.\n\n Configures terminal callbacks and associated state such as the\n write_pty callback and userdata pointer. The value is passed\n directly for pointer types (callbacks, userdata) or as a pointer\n to the value for non-pointer types (e.g. GhosttyString*).\n NULL clears the option to its default.\n\n Callbacks are invoked synchronously during ghostty_terminal_vt_write().\n Callbacks must not call ghostty_terminal_vt_write() on the same\n terminal (no reentrancy).\n\n              or NULL to clear the option\n"]
+    #[doc = " Set an option on the terminal.\n\n Configures terminal callbacks and associated state such as the\n write_pty callback and userdata pointer. The value is passed\n directly for pointer types (callbacks, userdata) or as a pointer\n to the value for non-pointer types (e.g. GhosttyString*).\n The behavior of a NULL value is specific to each option and is\n documented by the corresponding GhosttyTerminalOption value.\n\n Callbacks are invoked synchronously during ghostty_terminal_vt_write().\n Callbacks must not call ghostty_terminal_vt_write() on the same\n terminal (no reentrancy).\n\n              or NULL to clear the option\n"]
     pub fn ghostty_terminal_set(
         terminal: Terminal,
         option: TerminalOption::Type,
@@ -2562,102 +2706,6 @@ unsafe extern "C" {
         ref_: *const GridRef,
         tag: PointTag::Type,
         out: *mut PointCoordinate,
-    ) -> Result::Type;
-}
-#[doc = " Immutable compatibility and feature metadata for the complete snapshot codec."]
-#[repr(C)]
-#[derive(Debug, Default, Copy, Clone)]
-pub struct TerminalSnapshotCapabilities {
-    pub size: usize,
-    pub min_decode_version: u16,
-    pub max_decode_version: u16,
-    pub default_encode_version: u16,
-    pub continuation: bool,
-    pub ready: bool,
-    pub history: bool,
-}
-#[allow(clippy::unnecessary_operation, clippy::identity_op)]
-const _: () = {
-    ["Size of TerminalSnapshotCapabilities"]
-        [::std::mem::size_of::<TerminalSnapshotCapabilities>() - 24usize];
-    ["Alignment of TerminalSnapshotCapabilities"]
-        [::std::mem::align_of::<TerminalSnapshotCapabilities>() - 8usize];
-    ["Offset of field: TerminalSnapshotCapabilities::size"]
-        [::std::mem::offset_of!(TerminalSnapshotCapabilities, size) - 0usize];
-    ["Offset of field: TerminalSnapshotCapabilities::min_decode_version"]
-        [::std::mem::offset_of!(TerminalSnapshotCapabilities, min_decode_version) - 8usize];
-    ["Offset of field: TerminalSnapshotCapabilities::max_decode_version"]
-        [::std::mem::offset_of!(TerminalSnapshotCapabilities, max_decode_version) - 10usize];
-    ["Offset of field: TerminalSnapshotCapabilities::default_encode_version"]
-        [::std::mem::offset_of!(TerminalSnapshotCapabilities, default_encode_version) - 12usize];
-    ["Offset of field: TerminalSnapshotCapabilities::continuation"]
-        [::std::mem::offset_of!(TerminalSnapshotCapabilities, continuation) - 14usize];
-    ["Offset of field: TerminalSnapshotCapabilities::ready"]
-        [::std::mem::offset_of!(TerminalSnapshotCapabilities, ready) - 15usize];
-    ["Offset of field: TerminalSnapshotCapabilities::history"]
-        [::std::mem::offset_of!(TerminalSnapshotCapabilities, history) - 16usize];
-};
-unsafe extern "C" {
-    #[doc = " Return immutable complete-snapshot codec compatibility and feature metadata."]
-    pub fn ghostty_terminal_snapshot_capabilities(
-        out_capabilities: *mut TerminalSnapshotCapabilities,
-    ) -> Result::Type;
-}
-#[doc = " Allocator-owned bytes for one complete encoded terminal snapshot.\n\n Initialize `size` to `sizeof(GhosttyTerminalSnapshot)`. On success, release\n `data` with ghostty_free() using the same allocator passed to encode.\n"]
-#[repr(C)]
-#[derive(Debug, Default, Copy, Clone)]
-pub struct TerminalSnapshot {
-    pub size: usize,
-    pub data: *mut u8,
-    pub len: usize,
-}
-#[allow(clippy::unnecessary_operation, clippy::identity_op)]
-const _: () = {
-    ["Size of TerminalSnapshot"][::std::mem::size_of::<TerminalSnapshot>() - 24usize];
-    ["Alignment of TerminalSnapshot"][::std::mem::align_of::<TerminalSnapshot>() - 8usize];
-    ["Offset of field: TerminalSnapshot::size"]
-        [::std::mem::offset_of!(TerminalSnapshot, size) - 0usize];
-    ["Offset of field: TerminalSnapshot::data"]
-        [::std::mem::offset_of!(TerminalSnapshot, data) - 8usize];
-    ["Offset of field: TerminalSnapshot::len"]
-        [::std::mem::offset_of!(TerminalSnapshot, len) - 16usize];
-};
-#[doc = " Result of restoring exactly one complete terminal snapshot.\n\n On success, `terminal` is fully usable and `consumed` reports the bytes\n through the snapshot FINISH record. Trailing bytes remain unprocessed.\n"]
-#[repr(C)]
-#[derive(Debug, Default, Copy, Clone)]
-pub struct TerminalSnapshotDecodeResult {
-    pub size: usize,
-    pub terminal: Terminal,
-    pub consumed: usize,
-}
-#[allow(clippy::unnecessary_operation, clippy::identity_op)]
-const _: () = {
-    ["Size of TerminalSnapshotDecodeResult"]
-        [::std::mem::size_of::<TerminalSnapshotDecodeResult>() - 24usize];
-    ["Alignment of TerminalSnapshotDecodeResult"]
-        [::std::mem::align_of::<TerminalSnapshotDecodeResult>() - 8usize];
-    ["Offset of field: TerminalSnapshotDecodeResult::size"]
-        [::std::mem::offset_of!(TerminalSnapshotDecodeResult, size) - 0usize];
-    ["Offset of field: TerminalSnapshotDecodeResult::terminal"]
-        [::std::mem::offset_of!(TerminalSnapshotDecodeResult, terminal) - 8usize];
-    ["Offset of field: TerminalSnapshotDecodeResult::consumed"]
-        [::std::mem::offset_of!(TerminalSnapshotDecodeResult, consumed) - 16usize];
-};
-unsafe extern "C" {
-    #[doc = " Encode a terminal and its live VT stream continuation as one complete\n allocator-owned snapshot.\n"]
-    pub fn ghostty_terminal_snapshot_encode(
-        allocator: *const Allocator,
-        terminal: Terminal,
-        out_snapshot: *mut TerminalSnapshot,
-    ) -> Result::Type;
-}
-unsafe extern "C" {
-    #[doc = " Decode exactly one complete snapshot from the start of `data`.\n\n Trailing bytes are allowed and reported through `out_result.consumed`.\n"]
-    pub fn ghostty_terminal_snapshot_decode(
-        allocator: *const Allocator,
-        data: *const u8,
-        len: usize,
-        out_result: *mut TerminalSnapshotDecodeResult,
     ) -> Result::Type;
 }
 #[doc = " Extra screen state to include in styled output.\n"]
@@ -3746,7 +3794,7 @@ pub mod Key {
 unsafe extern "C" {
     #[doc = " Create a new key event instance.\n\n Creates a new key event with default values. The event must be freed using\n ghostty_key_event_free() when no longer needed.\n\n"]
     pub fn ghostty_key_event_new(allocator: *const Allocator, event: *mut KeyEvent)
-    -> Result::Type;
+        -> Result::Type;
 }
 unsafe extern "C" {
     #[doc = " Free a key event instance.\n\n Releases all resources associated with the key event. After this call,\n the event handle becomes invalid and must not be used.\n\n"]
@@ -4219,6 +4267,795 @@ unsafe extern "C" {
         buf_len: usize,
         out_written: *mut usize,
     ) -> Result::Type;
+}
+#[doc = " Immutable compatibility and feature metadata for the complete snapshot\n codec.\n\n Before calling ghostty_terminal_snapshot_capabilities(), set `size` to\n `sizeof(GhosttyTerminalSnapshotCapabilities)`. The decode bounds are\n inclusive. Feature booleans describe the format emitted by\n `default_encode_version`; older decoded versions may omit a feature."]
+#[repr(C)]
+#[derive(Debug, Default, Copy, Clone)]
+pub struct TerminalSnapshotCapabilities {
+    pub size: usize,
+    #[doc = " Lowest accepted envelope version, inclusive."]
+    pub min_decode_version: u16,
+    #[doc = " Highest accepted envelope version, inclusive."]
+    pub max_decode_version: u16,
+    #[doc = " Envelope version emitted by the whole-blob encoder."]
+    pub default_encode_version: u16,
+    #[doc = " Default encoding includes CONTINUATION before READY."]
+    pub continuation: bool,
+    #[doc = " Default encoding exposes an authenticated READY boundary."]
+    pub ready: bool,
+    #[doc = " Default encoding includes HISTORY/PAGE after READY."]
+    pub history: bool,
+}
+#[allow(clippy::unnecessary_operation, clippy::identity_op)]
+const _: () = {
+    ["Size of TerminalSnapshotCapabilities"]
+        [::std::mem::size_of::<TerminalSnapshotCapabilities>() - 24usize];
+    ["Alignment of TerminalSnapshotCapabilities"]
+        [::std::mem::align_of::<TerminalSnapshotCapabilities>() - 8usize];
+    ["Offset of field: TerminalSnapshotCapabilities::size"]
+        [::std::mem::offset_of!(TerminalSnapshotCapabilities, size) - 0usize];
+    ["Offset of field: TerminalSnapshotCapabilities::min_decode_version"]
+        [::std::mem::offset_of!(TerminalSnapshotCapabilities, min_decode_version) - 8usize];
+    ["Offset of field: TerminalSnapshotCapabilities::max_decode_version"]
+        [::std::mem::offset_of!(TerminalSnapshotCapabilities, max_decode_version) - 10usize];
+    ["Offset of field: TerminalSnapshotCapabilities::default_encode_version"]
+        [::std::mem::offset_of!(TerminalSnapshotCapabilities, default_encode_version) - 12usize];
+    ["Offset of field: TerminalSnapshotCapabilities::continuation"]
+        [::std::mem::offset_of!(TerminalSnapshotCapabilities, continuation) - 14usize];
+    ["Offset of field: TerminalSnapshotCapabilities::ready"]
+        [::std::mem::offset_of!(TerminalSnapshotCapabilities, ready) - 15usize];
+    ["Offset of field: TerminalSnapshotCapabilities::history"]
+        [::std::mem::offset_of!(TerminalSnapshotCapabilities, history) - 16usize];
+};
+unsafe extern "C" {
+    #[doc = " Return immutable codec compatibility and feature metadata.\n\n `out_capabilities` must be non-NULL and its `size` must be at least\n `sizeof(GhosttyTerminalSnapshotCapabilities)`."]
+    pub fn ghostty_terminal_snapshot_capabilities(
+        out_capabilities: *mut TerminalSnapshotCapabilities,
+    ) -> Result::Type;
+}
+#[doc = " Allocator-owned bytes for one complete encoded terminal snapshot.\n\n Before calling ghostty_terminal_snapshot_encode(), set `size` to\n `sizeof(GhosttyTerminalSnapshot)`. On success, `data` points to exactly `len`\n bytes allocated with the allocator passed to the encode call. Release the\n bytes with `ghostty_free(allocator, data, len)` using that same allocator.\n\n On failure, `data` is NULL and `len` is zero."]
+#[repr(C)]
+#[derive(Debug, Copy, Clone)]
+pub struct TerminalSnapshot {
+    pub size: usize,
+    pub data: *mut u8,
+    pub len: usize,
+}
+#[allow(clippy::unnecessary_operation, clippy::identity_op)]
+const _: () = {
+    ["Size of TerminalSnapshot"][::std::mem::size_of::<TerminalSnapshot>() - 24usize];
+    ["Alignment of TerminalSnapshot"][::std::mem::align_of::<TerminalSnapshot>() - 8usize];
+    ["Offset of field: TerminalSnapshot::size"]
+        [::std::mem::offset_of!(TerminalSnapshot, size) - 0usize];
+    ["Offset of field: TerminalSnapshot::data"]
+        [::std::mem::offset_of!(TerminalSnapshot, data) - 8usize];
+    ["Offset of field: TerminalSnapshot::len"]
+        [::std::mem::offset_of!(TerminalSnapshot, len) - 16usize];
+};
+impl Default for TerminalSnapshot {
+    fn default() -> Self {
+        let mut s = ::std::mem::MaybeUninit::<Self>::uninit();
+        unsafe {
+            ::std::ptr::write_bytes(s.as_mut_ptr(), 0, 1);
+            s.assume_init()
+        }
+    }
+}
+#[doc = " Result of restoring exactly one complete terminal snapshot.\n\n Before calling ghostty_terminal_snapshot_decode(), set `size` to\n `sizeof(GhosttyTerminalSnapshotDecodeResult)`. On success, `terminal` is a\n fully usable terminal with its standard VT stream continuation restored and\n `consumed` is the number of input bytes through the snapshot FINISH record.\n Any bytes in the input after `consumed` belong to the containing transport\n and are not processed by the snapshot decoder.\n\n The returned terminal owns allocations made through the allocator passed to\n decode and must be released with ghostty_terminal_free(). On failure,\n `terminal` is NULL and `consumed` is zero."]
+#[repr(C)]
+#[derive(Debug, Copy, Clone)]
+pub struct TerminalSnapshotDecodeResult {
+    pub size: usize,
+    pub terminal: Terminal,
+    pub consumed: usize,
+}
+#[allow(clippy::unnecessary_operation, clippy::identity_op)]
+const _: () = {
+    ["Size of TerminalSnapshotDecodeResult"]
+        [::std::mem::size_of::<TerminalSnapshotDecodeResult>() - 24usize];
+    ["Alignment of TerminalSnapshotDecodeResult"]
+        [::std::mem::align_of::<TerminalSnapshotDecodeResult>() - 8usize];
+    ["Offset of field: TerminalSnapshotDecodeResult::size"]
+        [::std::mem::offset_of!(TerminalSnapshotDecodeResult, size) - 0usize];
+    ["Offset of field: TerminalSnapshotDecodeResult::terminal"]
+        [::std::mem::offset_of!(TerminalSnapshotDecodeResult, terminal) - 8usize];
+    ["Offset of field: TerminalSnapshotDecodeResult::consumed"]
+        [::std::mem::offset_of!(TerminalSnapshotDecodeResult, consumed) - 16usize];
+};
+impl Default for TerminalSnapshotDecodeResult {
+    fn default() -> Self {
+        let mut s = ::std::mem::MaybeUninit::<Self>::uninit();
+        unsafe {
+            ::std::ptr::write_bytes(s.as_mut_ptr(), 0, 1);
+            s.assume_init()
+        }
+    }
+}
+unsafe extern "C" {
+    #[doc = " Encode a terminal and its live VT stream continuation as one complete\n allocator-owned version 2 snapshot.\n\n `allocator` may be NULL to use the library default. `terminal` and\n `out_snapshot` must be non-NULL, and `out_snapshot->size` must be at least\n `sizeof(GhosttyTerminalSnapshot)`.\n\n Returns `GHOSTTY_SUCCESS` on success, `GHOSTTY_OUT_OF_MEMORY` if allocation\n fails, `GHOSTTY_UNSUPPORTED_FEATURE` if version 2 cannot represent\n terminal-owned semantic state (currently Kitty graphics or glyph glossary\n entries), or `GHOSTTY_INVALID_VALUE` if the terminal cannot provide a\n complete canonical continuation or an argument is invalid."]
+    pub fn ghostty_terminal_snapshot_encode(
+        allocator: *const Allocator,
+        terminal: Terminal,
+        out_snapshot: *mut TerminalSnapshot,
+    ) -> Result::Type;
+}
+unsafe extern "C" {
+    #[doc = " Decode exactly one complete snapshot from the start of `data`.\n\n `allocator` may be NULL to use the library default. `data` may be NULL only\n when `len` is zero. `out_result` must be non-NULL, and `out_result->size`\n must be at least `sizeof(GhosttyTerminalSnapshotDecodeResult)`.\n\n The operation is transactional: no terminal is published until every record\n through FINISH has validated. Version 1 explicitly restores a ground stream;\n version 2 replays its canonical continuation exactly once at the terminal's\n final address. Trailing bytes are allowed and are reported via\n `out_result->consumed`.\n\n Returns `GHOSTTY_SUCCESS` on success, `GHOSTTY_OUT_OF_MEMORY` if allocation\n fails, or `GHOSTTY_INVALID_VALUE` for malformed, truncated, unsupported, or\n otherwise invalid input."]
+    pub fn ghostty_terminal_snapshot_decode(
+        allocator: *const Allocator,
+        data: *const u8,
+        len: usize,
+        out_result: *mut TerminalSnapshotDecodeResult,
+    ) -> Result::Type;
+}
+pub mod TerminalSnapshotStatus {
+    #[doc = " Detailed incremental codec and history result."]
+    pub type Type = ::std::os::raw::c_int;
+    pub const SUCCESS: Type = 0;
+    pub const UNSUPPORTED_FEATURE: Type = -1;
+    pub const UNKNOWN_VERSION: Type = -2;
+    pub const CORRUPTION: Type = -3;
+    pub const TRUNCATED: Type = -4;
+    pub const LIMIT_EXCEEDED: Type = -5;
+    pub const STALE: Type = -6;
+    pub const PRUNED: Type = -7;
+    pub const WRONG_GENERATION: Type = -8;
+    pub const WRONG_TERMINAL: Type = -9;
+    pub const INVALID_HANDLE: Type = -10;
+    pub const IMPORT_BUSY: Type = -11;
+    pub const OUT_OF_MEMORY: Type = -12;
+    pub const OUT_OF_SPACE: Type = -13;
+    pub const INVALID_STATE: Type = -14;
+    pub const CONTINUATION_UNAVAILABLE: Type = -15;
+    pub const RESET: Type = -16;
+    pub const RESIZE: Type = -17;
+    pub const MAX_VALUE: Type = 2147483647;
+}
+#[doc = " Sized, semantically opaque 32-byte checkpoint or capability token."]
+#[repr(C)]
+#[derive(Debug, Default, Copy, Clone)]
+pub struct TerminalHistoryToken {
+    pub size: usize,
+    pub bytes: [u8; 32usize],
+}
+#[allow(clippy::unnecessary_operation, clippy::identity_op)]
+const _: () = {
+    ["Size of TerminalHistoryToken"][::std::mem::size_of::<TerminalHistoryToken>() - 40usize];
+    ["Alignment of TerminalHistoryToken"][::std::mem::align_of::<TerminalHistoryToken>() - 8usize];
+    ["Offset of field: TerminalHistoryToken::size"]
+        [::std::mem::offset_of!(TerminalHistoryToken, size) - 0usize];
+    ["Offset of field: TerminalHistoryToken::bytes"]
+        [::std::mem::offset_of!(TerminalHistoryToken, bytes) - 8usize];
+};
+#[doc = " Incremental ABI feature and identity metadata.\n\n `codec_identity` and `build_identity` are immutable library-owned strings.\n Standalone freestanding/wasm builds do not have a secure entropy source:\n `authenticated_tokens` and `bounded_units` are false there, and the\n history lease/importer constructors return UNSUPPORTED_FEATURE. Snapshot\n capture and READY/history stream decoding remain available."]
+#[repr(C)]
+#[derive(Debug, Copy, Clone)]
+pub struct TerminalSnapshotIncrementalCapabilities {
+    pub size: usize,
+    pub version: u32,
+    pub min_decode_version: u16,
+    pub max_decode_version: u16,
+    pub default_encode_version: u16,
+    pub incremental: bool,
+    pub ready: bool,
+    pub history: bool,
+    pub authenticated_tokens: bool,
+    pub bounded_records: bool,
+    pub bounded_pages: bool,
+    pub bounded_units: bool,
+    pub max_record_bytes: usize,
+    pub max_pages: usize,
+    pub max_unit_bytes: usize,
+    pub max_rows: usize,
+    pub codec_identity: String,
+    pub build_identity: String,
+}
+#[allow(clippy::unnecessary_operation, clippy::identity_op)]
+const _: () = {
+    ["Size of TerminalSnapshotIncrementalCapabilities"]
+        [::std::mem::size_of::<TerminalSnapshotIncrementalCapabilities>() - 96usize];
+    ["Alignment of TerminalSnapshotIncrementalCapabilities"]
+        [::std::mem::align_of::<TerminalSnapshotIncrementalCapabilities>() - 8usize];
+    ["Offset of field: TerminalSnapshotIncrementalCapabilities::size"]
+        [::std::mem::offset_of!(TerminalSnapshotIncrementalCapabilities, size) - 0usize];
+    ["Offset of field: TerminalSnapshotIncrementalCapabilities::version"]
+        [::std::mem::offset_of!(TerminalSnapshotIncrementalCapabilities, version) - 8usize];
+    ["Offset of field: TerminalSnapshotIncrementalCapabilities::min_decode_version"][::std::mem::offset_of!(
+        TerminalSnapshotIncrementalCapabilities,
+        min_decode_version
+    ) - 12usize];
+    ["Offset of field: TerminalSnapshotIncrementalCapabilities::max_decode_version"][::std::mem::offset_of!(
+        TerminalSnapshotIncrementalCapabilities,
+        max_decode_version
+    ) - 14usize];
+    ["Offset of field: TerminalSnapshotIncrementalCapabilities::default_encode_version"][::std::mem::offset_of!(
+        TerminalSnapshotIncrementalCapabilities,
+        default_encode_version
+    )
+        - 16usize];
+    ["Offset of field: TerminalSnapshotIncrementalCapabilities::incremental"]
+        [::std::mem::offset_of!(TerminalSnapshotIncrementalCapabilities, incremental) - 18usize];
+    ["Offset of field: TerminalSnapshotIncrementalCapabilities::ready"]
+        [::std::mem::offset_of!(TerminalSnapshotIncrementalCapabilities, ready) - 19usize];
+    ["Offset of field: TerminalSnapshotIncrementalCapabilities::history"]
+        [::std::mem::offset_of!(TerminalSnapshotIncrementalCapabilities, history) - 20usize];
+    ["Offset of field: TerminalSnapshotIncrementalCapabilities::authenticated_tokens"][::std::mem::offset_of!(
+        TerminalSnapshotIncrementalCapabilities,
+        authenticated_tokens
+    ) - 21usize];
+    ["Offset of field: TerminalSnapshotIncrementalCapabilities::bounded_records"][::std::mem::offset_of!(
+        TerminalSnapshotIncrementalCapabilities,
+        bounded_records
+    ) - 22usize];
+    ["Offset of field: TerminalSnapshotIncrementalCapabilities::bounded_pages"]
+        [::std::mem::offset_of!(TerminalSnapshotIncrementalCapabilities, bounded_pages) - 23usize];
+    ["Offset of field: TerminalSnapshotIncrementalCapabilities::bounded_units"]
+        [::std::mem::offset_of!(TerminalSnapshotIncrementalCapabilities, bounded_units) - 24usize];
+    ["Offset of field: TerminalSnapshotIncrementalCapabilities::max_record_bytes"][::std::mem::offset_of!(
+        TerminalSnapshotIncrementalCapabilities,
+        max_record_bytes
+    ) - 32usize];
+    ["Offset of field: TerminalSnapshotIncrementalCapabilities::max_pages"]
+        [::std::mem::offset_of!(TerminalSnapshotIncrementalCapabilities, max_pages) - 40usize];
+    ["Offset of field: TerminalSnapshotIncrementalCapabilities::max_unit_bytes"]
+        [::std::mem::offset_of!(TerminalSnapshotIncrementalCapabilities, max_unit_bytes) - 48usize];
+    ["Offset of field: TerminalSnapshotIncrementalCapabilities::max_rows"]
+        [::std::mem::offset_of!(TerminalSnapshotIncrementalCapabilities, max_rows) - 56usize];
+    ["Offset of field: TerminalSnapshotIncrementalCapabilities::codec_identity"]
+        [::std::mem::offset_of!(TerminalSnapshotIncrementalCapabilities, codec_identity) - 64usize];
+    ["Offset of field: TerminalSnapshotIncrementalCapabilities::build_identity"]
+        [::std::mem::offset_of!(TerminalSnapshotIncrementalCapabilities, build_identity) - 80usize];
+};
+impl Default for TerminalSnapshotIncrementalCapabilities {
+    fn default() -> Self {
+        let mut s = ::std::mem::MaybeUninit::<Self>::uninit();
+        unsafe {
+            ::std::ptr::write_bytes(s.as_mut_ptr(), 0, 1);
+            s.assume_init()
+        }
+    }
+}
+#[repr(C)]
+#[derive(Debug, Default, Copy, Clone)]
+pub struct TerminalSnapshotCaptureOptions {
+    pub size: usize,
+    pub version: u32,
+    #[doc = " Inclusive limit for one envelope or framed record. Must be nonzero."]
+    pub max_record_bytes: usize,
+    #[doc = " Inclusive count of PAGE records. Must be nonzero."]
+    pub max_pages: usize,
+}
+#[allow(clippy::unnecessary_operation, clippy::identity_op)]
+const _: () = {
+    ["Size of TerminalSnapshotCaptureOptions"]
+        [::std::mem::size_of::<TerminalSnapshotCaptureOptions>() - 32usize];
+    ["Alignment of TerminalSnapshotCaptureOptions"]
+        [::std::mem::align_of::<TerminalSnapshotCaptureOptions>() - 8usize];
+    ["Offset of field: TerminalSnapshotCaptureOptions::size"]
+        [::std::mem::offset_of!(TerminalSnapshotCaptureOptions, size) - 0usize];
+    ["Offset of field: TerminalSnapshotCaptureOptions::version"]
+        [::std::mem::offset_of!(TerminalSnapshotCaptureOptions, version) - 8usize];
+    ["Offset of field: TerminalSnapshotCaptureOptions::max_record_bytes"]
+        [::std::mem::offset_of!(TerminalSnapshotCaptureOptions, max_record_bytes) - 16usize];
+    ["Offset of field: TerminalSnapshotCaptureOptions::max_pages"]
+        [::std::mem::offset_of!(TerminalSnapshotCaptureOptions, max_pages) - 24usize];
+};
+pub mod TerminalSnapshotCaptureEventKind {
+    pub type Type = ::std::os::raw::c_uint;
+    pub const RECORD: Type = 0;
+    pub const READY: Type = 1;
+    pub const HISTORY_BEGIN: Type = 2;
+    pub const HISTORY_PAGE: Type = 3;
+    pub const FINISH: Type = 4;
+    pub const MAX_VALUE: Type = 2147483647;
+}
+#[doc = " Result of one capture step. Exactly one opaque envelope or record is written.\n\n On OUT_OF_SPACE, `written` is zero, `required_bytes` is exact, and the next\n call observes the same event and bytes. `checkpoint` is nonzero only for\n READY and is the authenticated READY prefix digest."]
+#[repr(C)]
+#[derive(Debug, Copy, Clone)]
+pub struct TerminalSnapshotCaptureEvent {
+    pub size: usize,
+    pub version: u32,
+    pub kind: TerminalSnapshotCaptureEventKind::Type,
+    pub codec_version: u16,
+    pub screen_key: u16,
+    pub index: u32,
+    pub count: u32,
+    pub written: usize,
+    pub required_bytes: usize,
+    pub checkpoint: TerminalHistoryToken,
+}
+#[allow(clippy::unnecessary_operation, clippy::identity_op)]
+const _: () = {
+    ["Size of TerminalSnapshotCaptureEvent"]
+        [::std::mem::size_of::<TerminalSnapshotCaptureEvent>() - 88usize];
+    ["Alignment of TerminalSnapshotCaptureEvent"]
+        [::std::mem::align_of::<TerminalSnapshotCaptureEvent>() - 8usize];
+    ["Offset of field: TerminalSnapshotCaptureEvent::size"]
+        [::std::mem::offset_of!(TerminalSnapshotCaptureEvent, size) - 0usize];
+    ["Offset of field: TerminalSnapshotCaptureEvent::version"]
+        [::std::mem::offset_of!(TerminalSnapshotCaptureEvent, version) - 8usize];
+    ["Offset of field: TerminalSnapshotCaptureEvent::kind"]
+        [::std::mem::offset_of!(TerminalSnapshotCaptureEvent, kind) - 12usize];
+    ["Offset of field: TerminalSnapshotCaptureEvent::codec_version"]
+        [::std::mem::offset_of!(TerminalSnapshotCaptureEvent, codec_version) - 16usize];
+    ["Offset of field: TerminalSnapshotCaptureEvent::screen_key"]
+        [::std::mem::offset_of!(TerminalSnapshotCaptureEvent, screen_key) - 18usize];
+    ["Offset of field: TerminalSnapshotCaptureEvent::index"]
+        [::std::mem::offset_of!(TerminalSnapshotCaptureEvent, index) - 20usize];
+    ["Offset of field: TerminalSnapshotCaptureEvent::count"]
+        [::std::mem::offset_of!(TerminalSnapshotCaptureEvent, count) - 24usize];
+    ["Offset of field: TerminalSnapshotCaptureEvent::written"]
+        [::std::mem::offset_of!(TerminalSnapshotCaptureEvent, written) - 32usize];
+    ["Offset of field: TerminalSnapshotCaptureEvent::required_bytes"]
+        [::std::mem::offset_of!(TerminalSnapshotCaptureEvent, required_bytes) - 40usize];
+    ["Offset of field: TerminalSnapshotCaptureEvent::checkpoint"]
+        [::std::mem::offset_of!(TerminalSnapshotCaptureEvent, checkpoint) - 48usize];
+};
+impl Default for TerminalSnapshotCaptureEvent {
+    fn default() -> Self {
+        let mut s = ::std::mem::MaybeUninit::<Self>::uninit();
+        unsafe {
+            ::std::ptr::write_bytes(s.as_mut_ptr(), 0, 1);
+            s.assume_init()
+        }
+    }
+}
+#[repr(C)]
+#[derive(Debug, Default, Copy, Clone)]
+pub struct TerminalSnapshotDecoderOptions {
+    pub size: usize,
+    pub version: u32,
+    pub max_continuation_bytes: usize,
+    pub max_record_bytes: usize,
+    pub max_pages: usize,
+}
+#[allow(clippy::unnecessary_operation, clippy::identity_op)]
+const _: () = {
+    ["Size of TerminalSnapshotDecoderOptions"]
+        [::std::mem::size_of::<TerminalSnapshotDecoderOptions>() - 40usize];
+    ["Alignment of TerminalSnapshotDecoderOptions"]
+        [::std::mem::align_of::<TerminalSnapshotDecoderOptions>() - 8usize];
+    ["Offset of field: TerminalSnapshotDecoderOptions::size"]
+        [::std::mem::offset_of!(TerminalSnapshotDecoderOptions, size) - 0usize];
+    ["Offset of field: TerminalSnapshotDecoderOptions::version"]
+        [::std::mem::offset_of!(TerminalSnapshotDecoderOptions, version) - 8usize];
+    ["Offset of field: TerminalSnapshotDecoderOptions::max_continuation_bytes"]
+        [::std::mem::offset_of!(TerminalSnapshotDecoderOptions, max_continuation_bytes) - 16usize];
+    ["Offset of field: TerminalSnapshotDecoderOptions::max_record_bytes"]
+        [::std::mem::offset_of!(TerminalSnapshotDecoderOptions, max_record_bytes) - 24usize];
+    ["Offset of field: TerminalSnapshotDecoderOptions::max_pages"]
+        [::std::mem::offset_of!(TerminalSnapshotDecoderOptions, max_pages) - 32usize];
+};
+pub mod TerminalSnapshotDecodeEventKind {
+    pub type Type = ::std::os::raw::c_uint;
+    pub const NEED_INPUT: Type = 0;
+    pub const PROGRESS: Type = 1;
+    pub const READY: Type = 2;
+    pub const HISTORY_BEGIN: Type = 3;
+    pub const HISTORY_PAGE: Type = 4;
+    pub const FINISH: Type = 5;
+    pub const MAX_VALUE: Type = 2147483647;
+}
+#[doc = " Decoder event for one bounded state transition.\n\n `consumed` never includes bytes after FINISH. The caller must submit the\n unconsumed suffix to its live VT stream after taking and replaying READY."]
+#[repr(C)]
+#[derive(Debug, Copy, Clone)]
+pub struct TerminalSnapshotDecodeEvent {
+    pub size: usize,
+    pub version: u32,
+    pub kind: TerminalSnapshotDecodeEventKind::Type,
+    pub codec_version: u16,
+    pub screen_key: u16,
+    pub index: u32,
+    pub count: u32,
+    pub retained: bool,
+    pub consumed: usize,
+    pub needed: usize,
+}
+#[allow(clippy::unnecessary_operation, clippy::identity_op)]
+const _: () = {
+    ["Size of TerminalSnapshotDecodeEvent"]
+        [::std::mem::size_of::<TerminalSnapshotDecodeEvent>() - 48usize];
+    ["Alignment of TerminalSnapshotDecodeEvent"]
+        [::std::mem::align_of::<TerminalSnapshotDecodeEvent>() - 8usize];
+    ["Offset of field: TerminalSnapshotDecodeEvent::size"]
+        [::std::mem::offset_of!(TerminalSnapshotDecodeEvent, size) - 0usize];
+    ["Offset of field: TerminalSnapshotDecodeEvent::version"]
+        [::std::mem::offset_of!(TerminalSnapshotDecodeEvent, version) - 8usize];
+    ["Offset of field: TerminalSnapshotDecodeEvent::kind"]
+        [::std::mem::offset_of!(TerminalSnapshotDecodeEvent, kind) - 12usize];
+    ["Offset of field: TerminalSnapshotDecodeEvent::codec_version"]
+        [::std::mem::offset_of!(TerminalSnapshotDecodeEvent, codec_version) - 16usize];
+    ["Offset of field: TerminalSnapshotDecodeEvent::screen_key"]
+        [::std::mem::offset_of!(TerminalSnapshotDecodeEvent, screen_key) - 18usize];
+    ["Offset of field: TerminalSnapshotDecodeEvent::index"]
+        [::std::mem::offset_of!(TerminalSnapshotDecodeEvent, index) - 20usize];
+    ["Offset of field: TerminalSnapshotDecodeEvent::count"]
+        [::std::mem::offset_of!(TerminalSnapshotDecodeEvent, count) - 24usize];
+    ["Offset of field: TerminalSnapshotDecodeEvent::retained"]
+        [::std::mem::offset_of!(TerminalSnapshotDecodeEvent, retained) - 28usize];
+    ["Offset of field: TerminalSnapshotDecodeEvent::consumed"]
+        [::std::mem::offset_of!(TerminalSnapshotDecodeEvent, consumed) - 32usize];
+    ["Offset of field: TerminalSnapshotDecodeEvent::needed"]
+        [::std::mem::offset_of!(TerminalSnapshotDecodeEvent, needed) - 40usize];
+};
+impl Default for TerminalSnapshotDecodeEvent {
+    fn default() -> Self {
+        let mut s = ::std::mem::MaybeUninit::<Self>::uninit();
+        unsafe {
+            ::std::ptr::write_bytes(s.as_mut_ptr(), 0, 1);
+            s.assume_init()
+        }
+    }
+}
+#[repr(C)]
+#[derive(Debug, Copy, Clone)]
+pub struct TerminalSnapshotTakeTerminalResult {
+    pub size: usize,
+    pub version: u32,
+    pub terminal: Terminal,
+    pub codec_version: u16,
+}
+#[allow(clippy::unnecessary_operation, clippy::identity_op)]
+const _: () = {
+    ["Size of TerminalSnapshotTakeTerminalResult"]
+        [::std::mem::size_of::<TerminalSnapshotTakeTerminalResult>() - 32usize];
+    ["Alignment of TerminalSnapshotTakeTerminalResult"]
+        [::std::mem::align_of::<TerminalSnapshotTakeTerminalResult>() - 8usize];
+    ["Offset of field: TerminalSnapshotTakeTerminalResult::size"]
+        [::std::mem::offset_of!(TerminalSnapshotTakeTerminalResult, size) - 0usize];
+    ["Offset of field: TerminalSnapshotTakeTerminalResult::version"]
+        [::std::mem::offset_of!(TerminalSnapshotTakeTerminalResult, version) - 8usize];
+    ["Offset of field: TerminalSnapshotTakeTerminalResult::terminal"]
+        [::std::mem::offset_of!(TerminalSnapshotTakeTerminalResult, terminal) - 16usize];
+    ["Offset of field: TerminalSnapshotTakeTerminalResult::codec_version"]
+        [::std::mem::offset_of!(TerminalSnapshotTakeTerminalResult, codec_version) - 24usize];
+};
+impl Default for TerminalSnapshotTakeTerminalResult {
+    fn default() -> Self {
+        let mut s = ::std::mem::MaybeUninit::<Self>::uninit();
+        unsafe {
+            ::std::ptr::write_bytes(s.as_mut_ptr(), 0, 1);
+            s.assume_init()
+        }
+    }
+}
+#[doc = " Shared strict budget for one history cursor/import operation.\n\n `max_units` is consumed only by importer construction; byte and row limits\n are applied independently on every next/push."]
+#[repr(C)]
+#[derive(Debug, Default, Copy, Clone)]
+pub struct TerminalHistoryOptions {
+    pub size: usize,
+    pub version: u32,
+    pub max_unit_bytes: usize,
+    pub max_rows: usize,
+    pub max_units: usize,
+}
+#[allow(clippy::unnecessary_operation, clippy::identity_op)]
+const _: () = {
+    ["Size of TerminalHistoryOptions"][::std::mem::size_of::<TerminalHistoryOptions>() - 40usize];
+    ["Alignment of TerminalHistoryOptions"]
+        [::std::mem::align_of::<TerminalHistoryOptions>() - 8usize];
+    ["Offset of field: TerminalHistoryOptions::size"]
+        [::std::mem::offset_of!(TerminalHistoryOptions, size) - 0usize];
+    ["Offset of field: TerminalHistoryOptions::version"]
+        [::std::mem::offset_of!(TerminalHistoryOptions, version) - 8usize];
+    ["Offset of field: TerminalHistoryOptions::max_unit_bytes"]
+        [::std::mem::offset_of!(TerminalHistoryOptions, max_unit_bytes) - 16usize];
+    ["Offset of field: TerminalHistoryOptions::max_rows"]
+        [::std::mem::offset_of!(TerminalHistoryOptions, max_rows) - 24usize];
+    ["Offset of field: TerminalHistoryOptions::max_units"]
+        [::std::mem::offset_of!(TerminalHistoryOptions, max_units) - 32usize];
+};
+#[repr(C)]
+#[derive(Debug, Copy, Clone)]
+pub struct TerminalHistoryLeaseResult {
+    pub size: usize,
+    pub version: u32,
+    pub lease: TerminalHistoryLease,
+    pub checkpoint: TerminalHistoryToken,
+}
+#[allow(clippy::unnecessary_operation, clippy::identity_op)]
+const _: () = {
+    ["Size of TerminalHistoryLeaseResult"]
+        [::std::mem::size_of::<TerminalHistoryLeaseResult>() - 64usize];
+    ["Alignment of TerminalHistoryLeaseResult"]
+        [::std::mem::align_of::<TerminalHistoryLeaseResult>() - 8usize];
+    ["Offset of field: TerminalHistoryLeaseResult::size"]
+        [::std::mem::offset_of!(TerminalHistoryLeaseResult, size) - 0usize];
+    ["Offset of field: TerminalHistoryLeaseResult::version"]
+        [::std::mem::offset_of!(TerminalHistoryLeaseResult, version) - 8usize];
+    ["Offset of field: TerminalHistoryLeaseResult::lease"]
+        [::std::mem::offset_of!(TerminalHistoryLeaseResult, lease) - 16usize];
+    ["Offset of field: TerminalHistoryLeaseResult::checkpoint"]
+        [::std::mem::offset_of!(TerminalHistoryLeaseResult, checkpoint) - 24usize];
+};
+impl Default for TerminalHistoryLeaseResult {
+    fn default() -> Self {
+        let mut s = ::std::mem::MaybeUninit::<Self>::uninit();
+        unsafe {
+            ::std::ptr::write_bytes(s.as_mut_ptr(), 0, 1);
+            s.assume_init()
+        }
+    }
+}
+#[repr(C)]
+#[derive(Debug, Copy, Clone)]
+pub struct TerminalHistoryCursorResult {
+    pub size: usize,
+    pub version: u32,
+    pub cursor: TerminalHistoryCursor,
+    pub capability: TerminalHistoryToken,
+}
+#[allow(clippy::unnecessary_operation, clippy::identity_op)]
+const _: () = {
+    ["Size of TerminalHistoryCursorResult"]
+        [::std::mem::size_of::<TerminalHistoryCursorResult>() - 64usize];
+    ["Alignment of TerminalHistoryCursorResult"]
+        [::std::mem::align_of::<TerminalHistoryCursorResult>() - 8usize];
+    ["Offset of field: TerminalHistoryCursorResult::size"]
+        [::std::mem::offset_of!(TerminalHistoryCursorResult, size) - 0usize];
+    ["Offset of field: TerminalHistoryCursorResult::version"]
+        [::std::mem::offset_of!(TerminalHistoryCursorResult, version) - 8usize];
+    ["Offset of field: TerminalHistoryCursorResult::cursor"]
+        [::std::mem::offset_of!(TerminalHistoryCursorResult, cursor) - 16usize];
+    ["Offset of field: TerminalHistoryCursorResult::capability"]
+        [::std::mem::offset_of!(TerminalHistoryCursorResult, capability) - 24usize];
+};
+impl Default for TerminalHistoryCursorResult {
+    fn default() -> Self {
+        let mut s = ::std::mem::MaybeUninit::<Self>::uninit();
+        unsafe {
+            ::std::ptr::write_bytes(s.as_mut_ptr(), 0, 1);
+            s.assume_init()
+        }
+    }
+}
+pub mod TerminalHistoryEventKind {
+    pub type Type = ::std::os::raw::c_uint;
+    pub const UNIT: Type = 0;
+    pub const END: Type = 1;
+    pub const EVENT_MAX_VALUE: Type = 2147483647;
+}
+#[repr(C)]
+#[derive(Debug, Copy, Clone)]
+pub struct TerminalHistoryEvent {
+    pub size: usize,
+    pub version: u32,
+    pub kind: TerminalHistoryEventKind::Type,
+    pub written: usize,
+    pub required_bytes: usize,
+    pub rows: usize,
+    pub page_complete: bool,
+}
+#[allow(clippy::unnecessary_operation, clippy::identity_op)]
+const _: () = {
+    ["Size of TerminalHistoryEvent"][::std::mem::size_of::<TerminalHistoryEvent>() - 48usize];
+    ["Alignment of TerminalHistoryEvent"][::std::mem::align_of::<TerminalHistoryEvent>() - 8usize];
+    ["Offset of field: TerminalHistoryEvent::size"]
+        [::std::mem::offset_of!(TerminalHistoryEvent, size) - 0usize];
+    ["Offset of field: TerminalHistoryEvent::version"]
+        [::std::mem::offset_of!(TerminalHistoryEvent, version) - 8usize];
+    ["Offset of field: TerminalHistoryEvent::kind"]
+        [::std::mem::offset_of!(TerminalHistoryEvent, kind) - 12usize];
+    ["Offset of field: TerminalHistoryEvent::written"]
+        [::std::mem::offset_of!(TerminalHistoryEvent, written) - 16usize];
+    ["Offset of field: TerminalHistoryEvent::required_bytes"]
+        [::std::mem::offset_of!(TerminalHistoryEvent, required_bytes) - 24usize];
+    ["Offset of field: TerminalHistoryEvent::rows"]
+        [::std::mem::offset_of!(TerminalHistoryEvent, rows) - 32usize];
+    ["Offset of field: TerminalHistoryEvent::page_complete"]
+        [::std::mem::offset_of!(TerminalHistoryEvent, page_complete) - 40usize];
+};
+impl Default for TerminalHistoryEvent {
+    fn default() -> Self {
+        let mut s = ::std::mem::MaybeUninit::<Self>::uninit();
+        unsafe {
+            ::std::ptr::write_bytes(s.as_mut_ptr(), 0, 1);
+            s.assume_init()
+        }
+    }
+}
+#[repr(C)]
+#[derive(Debug, Copy, Clone)]
+pub struct TerminalHistoryImporterResult {
+    pub size: usize,
+    pub version: u32,
+    pub importer: TerminalHistoryImporter,
+    pub capability: TerminalHistoryToken,
+}
+#[allow(clippy::unnecessary_operation, clippy::identity_op)]
+const _: () = {
+    ["Size of TerminalHistoryImporterResult"]
+        [::std::mem::size_of::<TerminalHistoryImporterResult>() - 64usize];
+    ["Alignment of TerminalHistoryImporterResult"]
+        [::std::mem::align_of::<TerminalHistoryImporterResult>() - 8usize];
+    ["Offset of field: TerminalHistoryImporterResult::size"]
+        [::std::mem::offset_of!(TerminalHistoryImporterResult, size) - 0usize];
+    ["Offset of field: TerminalHistoryImporterResult::version"]
+        [::std::mem::offset_of!(TerminalHistoryImporterResult, version) - 8usize];
+    ["Offset of field: TerminalHistoryImporterResult::importer"]
+        [::std::mem::offset_of!(TerminalHistoryImporterResult, importer) - 16usize];
+    ["Offset of field: TerminalHistoryImporterResult::capability"]
+        [::std::mem::offset_of!(TerminalHistoryImporterResult, capability) - 24usize];
+};
+impl Default for TerminalHistoryImporterResult {
+    fn default() -> Self {
+        let mut s = ::std::mem::MaybeUninit::<Self>::uninit();
+        unsafe {
+            ::std::ptr::write_bytes(s.as_mut_ptr(), 0, 1);
+            s.assume_init()
+        }
+    }
+}
+#[repr(C)]
+#[derive(Debug, Default, Copy, Clone)]
+pub struct TerminalHistoryImportEvent {
+    pub size: usize,
+    pub version: u32,
+    pub consumed: usize,
+    pub required_bytes: usize,
+    pub required_rows: usize,
+    pub rows: usize,
+    pub retained: bool,
+}
+#[allow(clippy::unnecessary_operation, clippy::identity_op)]
+const _: () = {
+    ["Size of TerminalHistoryImportEvent"]
+        [::std::mem::size_of::<TerminalHistoryImportEvent>() - 56usize];
+    ["Alignment of TerminalHistoryImportEvent"]
+        [::std::mem::align_of::<TerminalHistoryImportEvent>() - 8usize];
+    ["Offset of field: TerminalHistoryImportEvent::size"]
+        [::std::mem::offset_of!(TerminalHistoryImportEvent, size) - 0usize];
+    ["Offset of field: TerminalHistoryImportEvent::version"]
+        [::std::mem::offset_of!(TerminalHistoryImportEvent, version) - 8usize];
+    ["Offset of field: TerminalHistoryImportEvent::consumed"]
+        [::std::mem::offset_of!(TerminalHistoryImportEvent, consumed) - 16usize];
+    ["Offset of field: TerminalHistoryImportEvent::required_bytes"]
+        [::std::mem::offset_of!(TerminalHistoryImportEvent, required_bytes) - 24usize];
+    ["Offset of field: TerminalHistoryImportEvent::required_rows"]
+        [::std::mem::offset_of!(TerminalHistoryImportEvent, required_rows) - 32usize];
+    ["Offset of field: TerminalHistoryImportEvent::rows"]
+        [::std::mem::offset_of!(TerminalHistoryImportEvent, rows) - 40usize];
+    ["Offset of field: TerminalHistoryImportEvent::retained"]
+        [::std::mem::offset_of!(TerminalHistoryImportEvent, retained) - 48usize];
+};
+unsafe extern "C" {
+    pub fn ghostty_terminal_snapshot_incremental_capabilities(
+        out_capabilities: *mut TerminalSnapshotIncrementalCapabilities,
+    ) -> TerminalSnapshotStatus::Type;
+}
+unsafe extern "C" {
+    #[doc = " Begin record-compatible v2 capture. The source terminal and continuation\n must remain serialized against mutation until READY; continuing through\n snapshot HISTORY/FINISH requires serialization until capture is freed."]
+    pub fn ghostty_terminal_snapshot_capture_new(
+        allocator: *const Allocator,
+        terminal: Terminal,
+        options: *const TerminalSnapshotCaptureOptions,
+        out_capture: *mut TerminalSnapshotCapture,
+    ) -> TerminalSnapshotStatus::Type;
+}
+unsafe extern "C" {
+    pub fn ghostty_terminal_snapshot_capture_next(
+        capture: TerminalSnapshotCapture,
+        buffer: *mut u8,
+        buffer_len: usize,
+        out_event: *mut TerminalSnapshotCaptureEvent,
+    ) -> TerminalSnapshotStatus::Type;
+}
+unsafe extern "C" {
+    pub fn ghostty_terminal_snapshot_capture_abort(
+        capture: TerminalSnapshotCapture,
+    ) -> TerminalSnapshotStatus::Type;
+}
+unsafe extern "C" {
+    pub fn ghostty_terminal_snapshot_capture_free(capture: TerminalSnapshotCapture);
+}
+unsafe extern "C" {
+    pub fn ghostty_terminal_snapshot_decoder_new(
+        allocator: *const Allocator,
+        options: *const TerminalSnapshotDecoderOptions,
+        out_decoder: *mut TerminalSnapshotDecoder,
+    ) -> TerminalSnapshotStatus::Type;
+}
+unsafe extern "C" {
+    #[doc = " Push an arbitrary fragment and perform at most one bounded transition.\n A zero-length push is an EOF marker and returns TRUNCATED unless FINISH was\n already reported."]
+    pub fn ghostty_terminal_snapshot_decoder_push(
+        decoder: TerminalSnapshotDecoder,
+        data: *const u8,
+        len: usize,
+        out_event: *mut TerminalSnapshotDecodeEvent,
+    ) -> TerminalSnapshotStatus::Type;
+}
+unsafe extern "C" {
+    #[doc = " Transfer the authenticated READY terminal exactly once."]
+    pub fn ghostty_terminal_snapshot_decoder_take_terminal(
+        decoder: TerminalSnapshotDecoder,
+        out_result: *mut TerminalSnapshotTakeTerminalResult,
+    ) -> TerminalSnapshotStatus::Type;
+}
+unsafe extern "C" {
+    #[doc = " Replay the authenticated standard-stream continuation exactly once.\n `terminal` must be the terminal returned by this decoder."]
+    pub fn ghostty_terminal_snapshot_decoder_replay_continuation(
+        decoder: TerminalSnapshotDecoder,
+        terminal: Terminal,
+    ) -> TerminalSnapshotStatus::Type;
+}
+unsafe extern "C" {
+    pub fn ghostty_terminal_snapshot_decoder_abort(
+        decoder: TerminalSnapshotDecoder,
+    ) -> TerminalSnapshotStatus::Type;
+}
+unsafe extern "C" {
+    pub fn ghostty_terminal_snapshot_decoder_free(decoder: TerminalSnapshotDecoder);
+}
+unsafe extern "C" {
+    #[doc = " Acquire one engine-owned, generation-bound history cut.\n Returns UNSUPPORTED_FEATURE when secure token entropy is unavailable."]
+    pub fn ghostty_terminal_history_lease_new(
+        allocator: *const Allocator,
+        terminal: Terminal,
+        screen_key: u16,
+        out_result: *mut TerminalHistoryLeaseResult,
+    ) -> TerminalSnapshotStatus::Type;
+}
+unsafe extern "C" {
+    #[doc = " Transfer the lease's newest-to-oldest cursor exactly once."]
+    pub fn ghostty_terminal_history_lease_cursor(
+        lease: TerminalHistoryLease,
+        terminal: Terminal,
+        out_result: *mut TerminalHistoryCursorResult,
+    ) -> TerminalSnapshotStatus::Type;
+}
+unsafe extern "C" {
+    pub fn ghostty_terminal_history_lease_free(lease: TerminalHistoryLease);
+}
+unsafe extern "C" {
+    #[doc = " Emit one authenticated opaque history unit under strict byte/row bounds.\n A short buffer returns OUT_OF_SPACE without advancing the cursor."]
+    pub fn ghostty_terminal_history_cursor_next(
+        cursor: TerminalHistoryCursor,
+        terminal: Terminal,
+        options: *const TerminalHistoryOptions,
+        buffer: *mut u8,
+        buffer_len: usize,
+        out_event: *mut TerminalHistoryEvent,
+    ) -> TerminalSnapshotStatus::Type;
+}
+unsafe extern "C" {
+    pub fn ghostty_terminal_history_cursor_free(cursor: TerminalHistoryCursor);
+}
+unsafe extern "C" {
+    #[doc = " Create a transactional importer for units authenticated by `checkpoint`.\n The source terminal and its lease must still be live; the destination owns\n imported pages and may receive serialized live VT writes between pushes.\n Returns UNSUPPORTED_FEATURE when secure token entropy is unavailable."]
+    pub fn ghostty_terminal_history_importer_new(
+        allocator: *const Allocator,
+        terminal: Terminal,
+        screen_key: u16,
+        source_terminal: Terminal,
+        checkpoint: *const TerminalHistoryToken,
+        options: *const TerminalHistoryOptions,
+        out_result: *mut TerminalHistoryImporterResult,
+    ) -> TerminalSnapshotStatus::Type;
+}
+unsafe extern "C" {
+    pub fn ghostty_terminal_history_importer_push(
+        importer: TerminalHistoryImporter,
+        terminal: Terminal,
+        unit: *const u8,
+        unit_len: usize,
+        options: *const TerminalHistoryOptions,
+        out_event: *mut TerminalHistoryImportEvent,
+    ) -> TerminalSnapshotStatus::Type;
+}
+unsafe extern "C" {
+    pub fn ghostty_terminal_history_importer_commit(
+        importer: TerminalHistoryImporter,
+        terminal: Terminal,
+    ) -> TerminalSnapshotStatus::Type;
+}
+unsafe extern "C" {
+    pub fn ghostty_terminal_history_importer_abort(
+        importer: TerminalHistoryImporter,
+        terminal: Terminal,
+    ) -> TerminalSnapshotStatus::Type;
+}
+unsafe extern "C" {
+    pub fn ghostty_terminal_history_importer_free(importer: TerminalHistoryImporter);
 }
 unsafe extern "C" {
     #[doc = " Returns the terminal display width of a Unicode codepoint in\n terminal grid cells: 0, 1, or 2.\n\n This is the same width table the terminal itself uses when laying\n out printed text, so callers can predict column layout (e.g. IME\n preedit overlays) that exactly matches what the terminal will do\n when the text is actually written to it.\n\n Semantics:\n - Returns 0 for zero-width codepoints: C0/C1 control characters,\n   nonspacing and enclosing combining marks, default-ignorable\n   codepoints (ZWJ, ZWNJ, variation selectors, etc.), and\n   surrogate codepoints.\n - Returns 2 for wide codepoints: East Asian Wide/Fullwidth\n   (including emoji with default emoji presentation) and regional\n   indicators. Width is clamped to 2 (e.g. the three-em dash).\n - Returns 1 for everything else, including invalid codepoints\n   beyond U+10FFFF (this function is total; it never fails).\n\n This operates on a single codepoint only and therefore cannot account\n for grapheme-cluster-level width rules (VS16 emoji presentation,\n combining sequences, etc.). For cluster-accurate widths, use\n ghostty_unicode_grapheme_width(). Summing per-codepoint widths is only\n correct when mode 2027 (grapheme clustering) is disabled.\n\n This function is pure, allocates nothing, and is thread-safe.\n"]

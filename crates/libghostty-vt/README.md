@@ -36,3 +36,19 @@ opaque. Malformed, truncated, unsupported, or version-incompatible snapshots
 return `Error::InvalidValue`; allocation failure returns `Error::OutOfMemory`.
 Use the `_with_alloc` variants when the encoded bytes or decoded terminal must
 use a custom allocator.
+
+## Incremental snapshots and history
+
+`snapshot::incremental` exposes the same codec as a bounded state machine.
+`Terminal::capture` writes one complete opaque record into a caller-owned
+buffer per step and reports an exact, nonadvancing short-buffer requirement.
+`Decoder` accepts arbitrary fragments, then requires a one-way READY terminal
+transfer and one-shot continuation replay before typed history and FINISH
+events can be consumed.
+
+Authenticated live history uses `Terminal::history_lease`,
+`HistoryLease::into_cursor`, and `HistoryCursor::importer`. Cursor units remain
+opaque and are written into caller-owned buffers. The importer transaction owns
+the destination borrow until commit or abort, but its `vt_write` method permits
+serialized live terminal input between older-history pushes. All incremental
+owners retain their originating allocator lifetime and are `!Send + !Sync`.

@@ -5,6 +5,8 @@
 //! incompatible decoder. This module intentionally exposes only complete
 //! snapshot blobs; it does not parse or expose Ghostty's internal records.
 
+pub mod incremental;
+
 use std::{marker::PhantomData, ops::Deref, ptr::NonNull};
 
 use crate::{
