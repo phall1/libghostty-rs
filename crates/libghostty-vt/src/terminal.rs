@@ -245,16 +245,6 @@ pub struct Options {
     pub max_scrollback: usize,
 }
 
-impl From<Options> for ffi::TerminalOptions {
-    fn from(value: Options) -> Self {
-        Self {
-            cols: value.cols,
-            rows: value.rows,
-            max_scrollback: value.max_scrollback,
-        }
-    }
-}
-
 /// Default visual style used when the cursor style is reset.
 #[repr(u32)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, int_enum::IntEnum)]
@@ -291,12 +281,20 @@ impl<'alloc: 'cb, 'cb> Terminal<'alloc, 'cb> {
 
     unsafe fn new_inner(alloc: *const ffi::Allocator, opts: Options) -> Result<Self> {
         let mut raw: ffi::Terminal = std::ptr::null_mut();
-        let result = unsafe { ffi::ghostty_terminal_new(alloc, &raw mut raw, opts.into()) };
+        let result =
+            unsafe { ffi::ghostty_terminal_new(alloc, &raw mut raw, opts.cols, opts.rows) };
         from_result(result)?;
-        Ok(Self {
+        let terminal = Self {
             inner: Object::new(raw)?,
             vtable: Box::new(VTable::default()),
-        })
+        };
+        // ghostty_terminal_new no longer takes a scrollback limit, so apply
+        // ours through the option interface before handing the terminal out.
+        terminal.set(
+            ffi::TerminalOption::SCROLLBACK_MAX_LINES,
+            &opts.max_scrollback,
+        )?;
+        Ok(terminal)
     }
 
     /// Write VT-encoded data to the terminal for processing.
