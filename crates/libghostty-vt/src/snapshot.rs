@@ -257,6 +257,140 @@ mod tests {
         .expect("terminal should initialize")
     }
 
+    fn parse_fixture(value: &str) -> Vec<u8> {
+        value
+            .lines()
+            .flat_map(|line| line.split_once('#').map_or(line, |(data, _)| data).split_whitespace())
+            .map(|byte| u8::from_str_radix(byte, 16).expect("fixture hex byte"))
+            .collect()
+    }
+
+    fn corpus_checksum(bytes: &[u8]) -> u64 {
+        bytes.iter().fold(14_695_981_039_346_656_037, |hash, byte| {
+            (hash ^ u64::from(*byte)).wrapping_mul(1_099_511_628_211)
+        })
+    }
+
+    fn before_ready_error(data: &[u8], end_input: bool) -> incremental::Error {
+        use incremental::{DecodeStep, Decoder, DecoderOptions};
+
+        let mut decoder = Decoder::new(DecoderOptions::default()).expect("decoder construction");
+        let mut offset = 0;
+        loop {
+            if offset == data.len() {
+                assert!(end_input, "fixture unexpectedly needs more input");
+                return decoder
+                    .end_input()
+                    .expect_err("end of incomplete input must fail")
+                    .error;
+            }
+            match decoder.push(&data[offset..]) {
+                Ok(DecodeStep::NeedInput {
+                    decoder: next,
+                    progress,
+                })
+                | Ok(DecodeStep::Progress {
+                    decoder: next,
+                    progress,
+                }) => {
+                    assert!(progress.consumed > 0);
+                    offset += progress.consumed;
+                    decoder = next;
+                }
+                Ok(DecodeStep::Ready { .. }) => {
+                    panic!("failure fixture reached READY")
+                }
+                Err(failure) => return failure.error,
+            }
+        }
+    }
+
+    #[test]
+    fn shared_codec_corpus_is_an_opaque_semantic_oracle() {
+        let cases = [
+            (
+                "shell-80x24",
+                include_str!("../testdata/snapshot-corpus/shell-80x24-v2.hex"),
+                31_920,
+                0x7940_94e8_f39f_40d8,
+                (80, 24),
+            ),
+            (
+                "rich-200x60",
+                include_str!("../testdata/snapshot-corpus/rich-200x60-v2.hex"),
+                385_539,
+                0x9b74_6bfb_359a_5eeb,
+                (200, 60),
+            ),
+            (
+                "history-multipage",
+                include_str!("../testdata/snapshot-corpus/history-multipage-v2.hex"),
+                771_100,
+                0x963a_ccc4_0a87_c60d,
+                (80, 24),
+            ),
+        ];
+
+        for (name, fixture, expected_len, expected_checksum, geometry) in cases {
+            let bytes = parse_fixture(fixture);
+            assert_eq!(bytes.len(), expected_len, "{name} byte length");
+            assert_eq!(
+                corpus_checksum(&bytes),
+                expected_checksum,
+                "{name} byte checksum"
+            );
+
+            let decoded = Terminal::decode_snapshot(&bytes).expect("corpus snapshot decode");
+            assert_eq!(decoded.consumed, bytes.len(), "{name} consumption");
+            assert_eq!(
+                (
+                    decoded.terminal.cols().expect("decoded columns"),
+                    decoded.terminal.rows().expect("decoded rows"),
+                ),
+                geometry,
+                "{name} geometry"
+            );
+            let reencoded = decoded
+                .terminal
+                .encode_snapshot()
+                .expect("semantic oracle re-encode");
+            assert_eq!(reencoded.as_ref(), bytes, "{name} exact semantic oracle");
+        }
+
+        let v1 = parse_fixture(include_str!(
+            "../testdata/snapshot-corpus/compat-v1.hex"
+        ));
+        let decoded = Terminal::decode_snapshot(&v1).expect("v1 compatibility decode");
+        assert_eq!(decoded.consumed, v1.len());
+        let upgraded = decoded
+            .terminal
+            .encode_snapshot()
+            .expect("v1 semantic re-encode");
+        Terminal::decode_snapshot(&upgraded).expect("upgraded v1 state decodes");
+
+        let control = parse_fixture(include_str!(
+            "../testdata/snapshot-corpus/shell-80x24-v2.hex"
+        ));
+        let mut future = control.clone();
+        future[8] = 3;
+        future[9] = 0;
+        assert_eq!(
+            before_ready_error(&future, false),
+            incremental::Error::UnknownVersion
+        );
+
+        let mut corrupt = control.clone();
+        corrupt[20] ^= 0x80;
+        assert_eq!(
+            before_ready_error(&corrupt, false),
+            incremental::Error::Corruption
+        );
+        assert_eq!(
+            before_ready_error(&control[..20], true),
+            incremental::Error::Truncated
+        );
+    }
+
     fn assert_equivalent(a: &Terminal<'_, '_>, b: &Terminal<'_, '_>) {
         let a = a.encode_snapshot().expect("first terminal should encode");
         let b = b.encode_snapshot().expect("second terminal should encode");
