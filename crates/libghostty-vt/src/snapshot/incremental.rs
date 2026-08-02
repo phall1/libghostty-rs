@@ -501,7 +501,8 @@ impl<'terminal_alloc: 'cb, 'cb> Terminal<'terminal_alloc, 'cb> {
     /// Consume this terminal into an owned live history cursor.
     ///
     /// Unlike [`Terminal::history_lease`], this shape permits controlled
-    /// terminal mutation through [`LiveHistoryCursor::terminal_mut`] while
+    /// mutation through [`LiveHistoryCursor::vt_write`],
+    /// [`LiveHistoryCursor::resize`], and [`LiveHistoryCursor::reset`] while
     /// engine copy-on-write keeps the older history cut stable.
     pub fn into_live_history_cursor(
         self,
@@ -880,8 +881,22 @@ impl std::error::Error for ContinuationFailure<'_, '_> {}
 
 /// Decoder after READY transfer and continuation replay.
 ///
-/// The owned terminal is live and may accept VT writes between later history
-/// transitions through [`DecodedStream::terminal_mut`].
+/// The owned terminal is live and may accept controlled VT writes between
+/// later history transitions through [`DecodedStream::vt_write`].
+///
+/// ```compile_fail
+/// use libghostty_vt::{Terminal, TerminalOptions};
+/// use libghostty_vt::snapshot::incremental::DecodedStream;
+///
+/// fn cannot_replace(stream: &mut DecodedStream<'static, 'static>) {
+///     let replacement = Terminal::new(TerminalOptions {
+///         cols: 80, rows: 24, max_scrollback: 100,
+///     }).unwrap();
+///     // Only a shared terminal reference is exposed while the native
+///     // decoder retains its handle through HISTORY and FINISH.
+///     let _old = std::mem::replace(stream.terminal(), replacement);
+/// }
+/// ```
 #[derive(Debug)]
 pub struct DecodedStream<'alloc: 'cb, 'cb> {
     core: DecoderCore<'alloc>,
@@ -895,9 +910,26 @@ impl<'alloc: 'cb, 'cb> DecodedStream<'alloc, 'cb> {
         &self.terminal
     }
 
-    /// Mutably borrow the terminal for serialized live VT writes.
-    pub fn terminal_mut(&mut self) -> &mut Terminal<'alloc, 'cb> {
-        &mut self.terminal
+    /// Process live VT bytes while preserving decoder ownership.
+    pub fn vt_write(&mut self, data: &[u8]) {
+        self.terminal.vt_write(data);
+    }
+
+    /// Resize the decoded terminal, explicitly invalidating pending history.
+    pub fn resize(
+        &mut self,
+        cols: u16,
+        rows: u16,
+        cell_width_px: u32,
+        cell_height_px: u32,
+    ) -> crate::error::Result<()> {
+        self.terminal
+            .resize(cols, rows, cell_width_px, cell_height_px)
+    }
+
+    /// Reset the decoded terminal, explicitly invalidating pending history.
+    pub fn reset(&mut self) {
+        self.terminal.reset();
     }
 
     /// Consume an arbitrary fragment after READY.
@@ -1848,9 +1880,7 @@ mod tests {
                         assert!(progress.consumed > 0);
                         offset += progress.consumed;
                         if live_during_history && !wrote_live {
-                            decoder
-                                .terminal_mut()
-                                .vt_write(b"live-between-decoded-history-pages\r\n");
+                            decoder.vt_write(b"live-between-decoded-history-pages\r\n");
                             wrote_live = true;
                         }
                         DriveState::After(decoder)
@@ -1863,6 +1893,116 @@ mod tests {
                 },
                 DriveState::Empty => unreachable!(),
             };
+        }
+    }
+
+    fn stream_after_history_page(data: &[u8]) -> (DecodedStream<'static, 'static>, usize) {
+        let mut decoder = Decoder::new(DecoderOptions::default()).expect("decoder construction");
+        let mut offset = 0;
+        let mut stream = loop {
+            match decoder.push(&data[offset..]) {
+                Ok(DecodeStep::NeedInput {
+                    decoder: next,
+                    progress,
+                })
+                | Ok(DecodeStep::Progress {
+                    decoder: next,
+                    progress,
+                }) => {
+                    assert!(progress.consumed > 0);
+                    offset += progress.consumed;
+                    decoder = next;
+                }
+                Ok(DecodeStep::Ready {
+                    decoder: ready,
+                    progress,
+                }) => {
+                    assert!(progress.consumed > 0);
+                    offset += progress.consumed;
+                    break ready
+                        .take_terminal::<'static>()
+                        .expect("READY terminal")
+                        .replay()
+                        .expect("continuation replay");
+                }
+                Err(error) => panic!("decode before READY failed: {error}"),
+            }
+        };
+
+        loop {
+            match stream.push(&data[offset..]) {
+                Ok(AfterReadyStep::NeedInput {
+                    decoder: next,
+                    progress,
+                })
+                | Ok(AfterReadyStep::Progress {
+                    decoder: next,
+                    progress,
+                })
+                | Ok(AfterReadyStep::HistoryBegin {
+                    decoder: next,
+                    progress,
+                    ..
+                }) => {
+                    assert!(progress.consumed > 0);
+                    offset += progress.consumed;
+                    stream = next;
+                }
+                Ok(AfterReadyStep::HistoryPage {
+                    decoder: next,
+                    progress,
+                    ..
+                }) => {
+                    assert!(progress.consumed > 0);
+                    offset += progress.consumed;
+                    return (next, offset);
+                }
+                Ok(AfterReadyStep::Finish(_)) => {
+                    panic!("snapshot needs multiple history pages for invalidation test")
+                }
+                Err(error) => panic!("decode before history page failed: {error}"),
+            }
+        }
+    }
+
+    fn expect_decoded_history_error(
+        mut stream: DecodedStream<'static, 'static>,
+        data: &[u8],
+        mut offset: usize,
+        expected: Error,
+    ) {
+        loop {
+            match stream.push(&data[offset..]) {
+                Err(failure) => {
+                    assert_eq!(failure.error, expected);
+                    return;
+                }
+                Ok(AfterReadyStep::NeedInput {
+                    decoder: next,
+                    progress,
+                })
+                | Ok(AfterReadyStep::Progress {
+                    decoder: next,
+                    progress,
+                })
+                | Ok(AfterReadyStep::HistoryBegin {
+                    decoder: next,
+                    progress,
+                    ..
+                })
+                | Ok(AfterReadyStep::HistoryPage {
+                    decoder: next,
+                    progress,
+                    ..
+                }) => {
+                    assert!(progress.consumed > 0);
+                    offset += progress.consumed;
+                    stream = next;
+                }
+                Ok(AfterReadyStep::Finish(_)) => {
+                    panic!("invalidated decoder reached FINISH without {expected}")
+                }
+            }
         }
     }
 
@@ -1896,6 +2036,37 @@ mod tests {
         assert_eq!(consumed, bytes.len());
         assert_eq!(&transport[consumed..], tail);
         decoded.vt_write(&transport[consumed..]);
+    }
+
+    #[test]
+    fn decoded_stream_accepts_live_writes_between_history_pages() {
+        let mut source = terminal(20, 4);
+        for row in 0..200 {
+            source.vt_write(format!("row-{row:03}\r\n").as_bytes());
+        }
+        let bytes = capture_all(&mut source);
+        let live = b"live-between-decoded-history-pages\r\n";
+        source.vt_write(live);
+        let (decoded, consumed) = decode_with_cut(&bytes, 1, true);
+        assert_eq!(consumed, bytes.len());
+        assert_semantically_equal(&source, &decoded);
+    }
+
+    #[test]
+    fn decoded_stream_reset_and_resize_invalidate_pending_history() {
+        let mut source = terminal(20, 4);
+        for row in 0..200 {
+            source.vt_write(format!("row-{row:03}\r\n").as_bytes());
+        }
+        let bytes = capture_all(&mut source);
+
+        let (mut reset, offset) = stream_after_history_page(&bytes);
+        reset.reset();
+        expect_decoded_history_error(reset, &bytes, offset, Error::Reset);
+
+        let (mut resized, offset) = stream_after_history_page(&bytes);
+        resized.resize(21, 5, 0, 0).expect("decoded resize");
+        expect_decoded_history_error(resized, &bytes, offset, Error::Resize);
     }
 
     #[test]
