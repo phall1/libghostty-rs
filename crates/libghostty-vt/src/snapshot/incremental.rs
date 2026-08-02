@@ -13,6 +13,9 @@ use crate::{
 };
 
 const ABI_VERSION: u32 = ffi::TERMINAL_SNAPSHOT_ABI_VERSION;
+
+/// Byte length of an opaque authenticated history token.
+pub const TOKEN_LEN: usize = ffi::TERMINAL_HISTORY_TOKEN_BYTES as usize;
 /// Result type for incremental snapshot and history operations.
 pub type Result<T, E = Error> = std::result::Result<T, E>;
 
@@ -149,6 +152,15 @@ impl CheckpointToken {
             _not_send_or_sync: PhantomData,
         }
     }
+
+    /// Borrow the authenticated bytes for transport without interpreting them.
+    ///
+    /// These bytes are opaque. They are only valid when echoed back within the
+    /// same engine-owned terminal generation; this crate intentionally exposes
+    /// no constructor from arbitrary bytes.
+    pub fn as_bytes(&self) -> &[u8; TOKEN_LEN] {
+        &self.raw.bytes
+    }
 }
 
 impl fmt::Debug for CheckpointToken {
@@ -174,6 +186,15 @@ impl CapabilityToken {
             _raw: raw,
             _not_send_or_sync: PhantomData,
         }
+    }
+
+    /// Borrow the authenticated bytes for transport without interpreting them.
+    ///
+    /// These bytes are opaque. They are only valid when echoed back within the
+    /// same engine-owned terminal generation; this crate intentionally exposes
+    /// no constructor from arbitrary bytes.
+    pub fn as_bytes(&self) -> &[u8; TOKEN_LEN] {
+        &self._raw.bytes
     }
 }
 
@@ -1594,10 +1615,19 @@ mod tests {
         let lease = source
             .history_lease(ScreenKey::PRIMARY)
             .expect("history lease");
+        let checkpoint_bytes = *lease.checkpoint().as_bytes();
+        assert_eq!(checkpoint_bytes.len(), TOKEN_LEN);
+        assert_eq!(lease.checkpoint().as_bytes(), &checkpoint_bytes);
         let mut cursor = lease.into_cursor().expect("one-way cursor transfer");
+        let cursor_capability = *cursor.capability().as_bytes();
+        assert_eq!(cursor_capability.len(), TOKEN_LEN);
+        assert_eq!(cursor.capability().as_bytes(), &cursor_capability);
         let mut importer = cursor
             .importer(&mut destination, HistoryOptions::default())
             .expect("history importer");
+        let importer_capability = *importer.capability().as_bytes();
+        assert_eq!(importer_capability.len(), TOKEN_LEN);
+        assert_eq!(importer.capability().as_bytes(), &importer_capability);
         let mut wrote_live = false;
         let mut corrupted = false;
 
