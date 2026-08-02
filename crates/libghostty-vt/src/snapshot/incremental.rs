@@ -133,6 +133,10 @@ impl ScreenKey {
 }
 
 /// Opaque authenticated digest for one READY history cut.
+#[allow(
+    missing_copy_implementations,
+    reason = "checkpoint capabilities are intentionally nonduplicable and single-thread affine"
+)]
 pub struct CheckpointToken {
     raw: ffi::TerminalHistoryToken,
     _not_send_or_sync: PhantomData<Rc<()>>,
@@ -154,15 +158,20 @@ impl fmt::Debug for CheckpointToken {
 }
 
 /// Opaque engine capability authorizing one cursor or importer.
+#[allow(
+    missing_copy_implementations,
+    reason = "engine capabilities are intentionally nonduplicable and single-thread affine"
+)]
 pub struct CapabilityToken {
-    raw: ffi::TerminalHistoryToken,
+    // Preserve the exact native capability without exposing serialization.
+    _raw: ffi::TerminalHistoryToken,
     _not_send_or_sync: PhantomData<Rc<()>>,
 }
 
 impl CapabilityToken {
     fn new(raw: ffi::TerminalHistoryToken) -> Self {
         Self {
-            raw,
+            _raw: raw,
             _not_send_or_sync: PhantomData,
         }
     }
@@ -1261,7 +1270,7 @@ pub struct HistoryImportEvent {
 pub struct HistoryImporter<'source, 'destination, 'lease_alloc, 'import_alloc> {
     inner: Object<'import_alloc, ffi::TerminalHistoryImporterImpl>,
     destination: NonNull<ffi::TerminalImpl>,
-    lease: Rc<LeaseInner<'source, 'lease_alloc>>,
+    _lease: Rc<LeaseInner<'source, 'lease_alloc>>,
     capability: CapabilityToken,
     finalized: bool,
     _destination: PhantomData<&'destination mut ()>,
@@ -1303,7 +1312,7 @@ impl<'source, 'destination, 'lease_alloc, 'import_alloc>
         Ok(Self {
             inner: Object::new(raw.importer).map_err(|_| Error::OutOfMemory)?,
             destination,
-            lease,
+            _lease: lease,
             capability: CapabilityToken::new(raw.capability),
             finalized: false,
             _destination: PhantomData,
