@@ -380,7 +380,7 @@ mod tests {
         );
 
         let mut corrupt = control.clone();
-        corrupt[20] ^= 0x80;
+        corrupt[16] ^= 0x80;
         assert_eq!(
             before_ready_error(&corrupt, false),
             incremental::Error::Corruption
