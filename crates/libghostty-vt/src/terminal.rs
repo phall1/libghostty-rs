@@ -786,9 +786,10 @@ impl<'alloc: 'cb, 'cb> Terminal<'alloc, 'cb> {
     /// Set the maximum number of physical scrollback lines.
     ///
     /// This is an approximate page-granularity limit used alongside the
-    /// configured byte limit.
-    pub fn set_scrollback_max_lines(&mut self, max: usize) -> Result<&mut Self> {
-        self.set(Opt::SCROLLBACK_MAX_LINES, &max)?;
+    /// configured byte limit. `None` removes the line limit while leaving the
+    /// byte limit unchanged.
+    pub fn set_scrollback_max_lines(&mut self, max: Option<usize>) -> Result<&mut Self> {
+        self.set_optional(Opt::SCROLLBACK_MAX_LINES, max.as_ref())?;
         Ok(self)
     }
 
@@ -1971,7 +1972,7 @@ mod tests {
 
     #[test]
     fn scrollback_line_limit_forwards_and_prunes() {
-        fn populated_total(max_lines: usize) -> u64 {
+        fn populated_total(max_lines: Option<usize>) -> u64 {
             let mut terminal = tiny_terminal();
             terminal
                 .set_scrollback_max_bytes(None)
@@ -1985,8 +1986,8 @@ mod tests {
             terminal.scrollbar().expect("scrollbar").total
         }
 
-        let capped = populated_total(8);
-        let generous = populated_total(4000);
+        let capped = populated_total(Some(8));
+        let generous = populated_total(None);
         assert!(
             capped < generous,
             "line cap must prune history: capped={capped}, generous={generous}"

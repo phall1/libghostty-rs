@@ -1160,8 +1160,8 @@ impl<'alloc: 'cb, 'cb> DecodedStream<'alloc, 'cb> {
         Ok(())
     }
 
-    /// Set the decoded terminal's physical scrollback line limit without moving it.
-    pub fn set_scrollback_max_lines(&mut self, max: usize) -> crate::error::Result<()> {
+    /// Set or clear the decoded terminal's physical scrollback line limit.
+    pub fn set_scrollback_max_lines(&mut self, max: Option<usize>) -> crate::error::Result<()> {
         self.terminal.set_scrollback_max_lines(max)?;
         Ok(())
     }
@@ -1704,8 +1704,8 @@ impl<'terminal_alloc: 'cb, 'cb, 'lease_alloc>
         Ok(())
     }
 
-    /// Set the owned terminal's physical scrollback line limit without moving it.
-    pub fn set_scrollback_max_lines(&mut self, max: usize) -> crate::error::Result<()> {
+    /// Set or clear the owned terminal's physical scrollback line limit.
+    pub fn set_scrollback_max_lines(&mut self, max: Option<usize>) -> crate::error::Result<()> {
         self.terminal
             .as_mut()
             .expect("live history cursor always owns its terminal")
@@ -2038,8 +2038,8 @@ impl<'terminal_alloc: 'cb, 'cb, 'lease_alloc> LiveHistorySet<'terminal_alloc, 'c
             .vt_write(data);
     }
 
-    /// Set the live terminal's physical scrollback line limit.
-    pub fn set_scrollback_max_lines(&mut self, max: usize) -> crate::error::Result<()> {
+    /// Set or clear the live terminal's physical scrollback line limit.
+    pub fn set_scrollback_max_lines(&mut self, max: Option<usize>) -> crate::error::Result<()> {
         self.terminal
             .as_mut()
             .expect("live history set always owns its terminal")
@@ -2507,7 +2507,7 @@ mod tests {
             .set_scrollback_max_bytes(None)
             .expect("remove source scrollback byte cap");
         source
-            .set_scrollback_max_lines(4000)
+            .set_scrollback_max_lines(Some(4000))
             .expect("raise source scrollback line cap");
         let full_width_content = [b'x'; 500];
         for _ in 0..2000 {
@@ -2567,7 +2567,10 @@ mod tests {
             .expect("control decode")
             .terminal;
 
-        let capture_options = CaptureOptions::default();
+        let capture_options = CaptureOptions {
+            max_pages: 64,
+            ..CaptureOptions::default()
+        };
         let mut capture = source
             .capture(capture_options)
             .expect("capture construction");
@@ -2600,11 +2603,22 @@ mod tests {
             })
             .expect_err("retained-byte limit must be transactional");
         assert_eq!(error, Error::LimitExceeded);
-        let mut continuation = capture
+        let CaptureDetachFailure {
+            error,
+            capture,
+        } = capture
             .detach_ready(DetachOptions {
                 max_pages: 4096,
                 max_total_bytes: 64 * 1024 * 1024,
                 max_rows: 7,
+            })
+            .expect_err("row splitting must honor the original page cap");
+        assert_eq!(error, Error::LimitExceeded);
+        let mut continuation = capture
+            .detach_ready(DetachOptions {
+                max_pages: 4096,
+                max_total_bytes: 64 * 1024 * 1024,
+                max_rows: 64,
             })
             .expect("READY detachment");
 
@@ -2638,14 +2652,14 @@ mod tests {
                         "row shortage must not advance"
                     );
                     let event = continuation
-                        .next(ContinuationOptions { max_rows: 7 }, &mut record)
+                        .next(ContinuationOptions { max_rows: 64 }, &mut record)
                         .expect("row-budget retry");
                     assert_eq!(event.rows, required_rows);
                     event
                 }
                 Err(other) => panic!("owned continuation delivery: {other:?}"),
             };
-            assert!(event.rows <= 7);
+            assert!(event.rows <= 64);
             if matches!(event.kind, CaptureEventKind::HistoryPage { .. }) {
                 assert!(event.rows > 0);
                 history_rows += event.rows;
@@ -2714,7 +2728,7 @@ mod tests {
                                 .set_scrollback_max_bytes(None)
                                 .expect("remove decoded scrollback byte cap");
                             stream
-                                .set_scrollback_max_lines(4000)
+                                .set_scrollback_max_lines(Some(4000))
                                 .expect("forward decoded scrollback line cap");
                         }
                         DriveState::After(stream)
@@ -2797,7 +2811,7 @@ mod tests {
                         .set_scrollback_max_bytes(None)
                         .expect("remove decoded scrollback byte cap");
                     decoded
-                        .set_scrollback_max_lines(4000)
+                        .set_scrollback_max_lines(Some(4000))
                         .expect("forward decoded scrollback line cap");
                     break decoded;
                 }
@@ -3115,7 +3129,7 @@ mod tests {
         let mut live = source
             .into_live_history_cursor(ScreenKey::PRIMARY)
             .expect("owned live cursor");
-        live.set_scrollback_max_lines(1000)
+        live.set_scrollback_max_lines(Some(1000))
             .expect("forward owned scrollback line cap");
         let checkpoint = *live.checkpoint().as_bytes();
         let capability = *live.capability().as_bytes();
