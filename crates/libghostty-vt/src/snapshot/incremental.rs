@@ -943,6 +943,15 @@ impl<'alloc: 'cb, 'cb> DecodedStream<'alloc, 'cb> {
         self.terminal.vt_write(data);
     }
 
+    /// Register live PTY write-back while retaining decoded terminal ownership.
+    pub fn on_pty_write(
+        &mut self,
+        callback: impl crate::terminal::PtyWriteFn<'alloc, 'cb>,
+    ) -> crate::error::Result<&mut Self> {
+        self.terminal.on_pty_write(callback)?;
+        Ok(self)
+    }
+
     /// Scroll the live decoded viewport without exposing terminal ownership.
     pub fn scroll_viewport(&mut self, scroll: ScrollViewport) {
         self.terminal.scroll_viewport(scroll);
@@ -2196,7 +2205,11 @@ impl Drop for HistoryImporter<'_, '_, '_, '_> {
 mod tests {
     use super::*;
     use crate::fmt::{Format, Formatter, FormatterOptions};
-    use std::{cell::Cell, ffi::c_void};
+    use std::{
+        cell::{Cell, RefCell},
+        ffi::c_void,
+        rc::Rc,
+    };
 
     #[test]
     fn reports_incremental_codec_identity_and_bounds() {
@@ -2608,6 +2621,15 @@ mod tests {
         let bytes = capture_all(&mut source);
 
         let (mut reset, offset) = stream_after_history_page(&bytes);
+        let replies = Rc::new(RefCell::new(Vec::new()));
+        let callback_replies = Rc::clone(&replies);
+        reset
+            .on_pty_write(move |_terminal, data| {
+                callback_replies.borrow_mut().extend_from_slice(data);
+            })
+            .expect("decoded PTY callback");
+        reset.vt_write(b"\x1b[5n");
+        assert_eq!(&*replies.borrow(), b"\x1b[0n");
         reset.reset();
         reset.vt_write(b"active-after-reset");
         let reset_active = semantic_terminal_bytes(reset.terminal());
