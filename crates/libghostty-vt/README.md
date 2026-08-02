@@ -52,3 +52,9 @@ opaque and are written into caller-owned buffers. The importer transaction owns
 the destination borrow until commit or abort, but its `vt_write` method permits
 serialized live terminal input between older-history pushes. All incremental
 owners retain their originating allocator lifetime and are `!Send + !Sync`.
+
+Actors that must continue feeding the source PTY while history pages use
+`Terminal::into_live_history_cursor`. It consumes and owns the terminal beside
+the lease/cursor, exposes controlled `terminal_mut` access between `next`
+calls, and releases cursor then lease before returning or dropping the
+terminal.

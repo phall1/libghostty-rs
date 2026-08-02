@@ -497,6 +497,28 @@ impl<'terminal_alloc: 'cb, 'cb> Terminal<'terminal_alloc, 'cb> {
     ) -> Result<HistoryLease<'terminal, 'lease_alloc>> {
         unsafe { HistoryLease::new_inner(allocator.to_raw(), self.inner.as_raw(), screen) }
     }
+
+    /// Consume this terminal into an owned live history cursor.
+    ///
+    /// Unlike [`Terminal::history_lease`], this shape permits controlled
+    /// terminal mutation through [`LiveHistoryCursor::terminal_mut`] while
+    /// engine copy-on-write keeps the older history cut stable.
+    pub fn into_live_history_cursor(
+        self,
+        screen: ScreenKey,
+    ) -> Result<LiveHistoryCursor<'terminal_alloc, 'cb, 'static>> {
+        unsafe { LiveHistoryCursor::new_inner(self, std::ptr::null(), screen) }
+    }
+
+    /// Consume this terminal into a live cursor using `allocator` for lease
+    /// and cursor state.
+    pub fn into_live_history_cursor_with_alloc<'lease_alloc, 'ctx: 'lease_alloc>(
+        self,
+        allocator: &'lease_alloc Allocator<'ctx>,
+        screen: ScreenKey,
+    ) -> Result<LiveHistoryCursor<'terminal_alloc, 'cb, 'lease_alloc>> {
+        unsafe { LiveHistoryCursor::new_inner(self, allocator.to_raw(), screen) }
+    }
 }
 
 impl<'terminal, 'alloc> Capture<'terminal, 'alloc> {
@@ -1176,6 +1198,45 @@ pub enum HistoryEvent<'buffer> {
     End,
 }
 
+fn history_cursor_next<'buffer>(
+    cursor: ffi::TerminalHistoryCursor,
+    terminal: ffi::Terminal,
+    options: HistoryOptions,
+    buffer: &'buffer mut [u8],
+) -> Result<HistoryEvent<'buffer>> {
+    let mut raw = ffi::TerminalHistoryEvent {
+        size: std::mem::size_of::<ffi::TerminalHistoryEvent>(),
+        version: ABI_VERSION,
+        ..Default::default()
+    };
+    let raw_options = options.raw();
+    let status = unsafe {
+        ffi::ghostty_terminal_history_cursor_next(
+            cursor,
+            terminal,
+            &raw const raw_options,
+            buffer.as_mut_ptr(),
+            buffer.len(),
+            &raw mut raw,
+        )
+    };
+    from_status(status, raw.required_bytes, 0)?;
+    match raw.kind {
+        ffi::TerminalHistoryEventKind::UNIT => {
+            if raw.written > buffer.len() || raw.required_bytes != raw.written {
+                return Err(Error::InvalidState);
+            }
+            Ok(HistoryEvent::Unit {
+                unit: &buffer[..raw.written],
+                rows: raw.rows,
+                page_complete: raw.page_complete,
+            })
+        }
+        ffi::TerminalHistoryEventKind::END => Ok(HistoryEvent::End),
+        _ => Err(Error::InvalidState),
+    }
+}
+
 /// Newest-to-oldest cursor for a live history cut.
 #[derive(Debug)]
 pub struct HistoryCursor<'terminal, 'alloc> {
@@ -1197,37 +1258,12 @@ impl<'terminal, 'alloc> HistoryCursor<'terminal, 'alloc> {
         options: HistoryOptions,
         buffer: &'buffer mut [u8],
     ) -> Result<HistoryEvent<'buffer>> {
-        let mut raw = ffi::TerminalHistoryEvent {
-            size: std::mem::size_of::<ffi::TerminalHistoryEvent>(),
-            version: ABI_VERSION,
-            ..Default::default()
-        };
-        let raw_options = options.raw();
-        let status = unsafe {
-            ffi::ghostty_terminal_history_cursor_next(
-                self.inner.as_raw(),
-                self.lease.source.as_ptr(),
-                &raw const raw_options,
-                buffer.as_mut_ptr(),
-                buffer.len(),
-                &raw mut raw,
-            )
-        };
-        from_status(status, raw.required_bytes, 0)?;
-        match raw.kind {
-            ffi::TerminalHistoryEventKind::UNIT => {
-                if raw.written > buffer.len() || raw.required_bytes != raw.written {
-                    return Err(Error::InvalidState);
-                }
-                Ok(HistoryEvent::Unit {
-                    unit: &buffer[..raw.written],
-                    rows: raw.rows,
-                    page_complete: raw.page_complete,
-                })
-            }
-            ffi::TerminalHistoryEventKind::END => Ok(HistoryEvent::End),
-            _ => Err(Error::InvalidState),
-        }
+        history_cursor_next(
+            self.inner.as_raw(),
+            self.lease.source.as_ptr(),
+            options,
+            buffer,
+        )
     }
 
     /// Begin a transactional import into `destination` using the default allocator.
@@ -1273,6 +1309,161 @@ impl<'terminal, 'alloc> HistoryCursor<'terminal, 'alloc> {
 impl Drop for HistoryCursor<'_, '_> {
     fn drop(&mut self) {
         unsafe { ffi::ghostty_terminal_history_cursor_free(self.inner.as_raw()) };
+    }
+}
+
+/// Owned terminal plus an engine copy-on-write history cut and cursor.
+///
+/// This shape is for actors that must keep processing live PTY input while
+/// paging older history. It consumes the terminal, so all mutation remains
+/// serialized through this owner. Drop and [`LiveHistoryCursor::into_terminal`]
+/// always release the cursor and lease before the terminal.
+#[derive(Debug)]
+pub struct LiveHistoryCursor<'terminal_alloc: 'cb, 'cb, 'lease_alloc> {
+    cursor: Option<Object<'lease_alloc, ffi::TerminalHistoryCursorImpl>>,
+    lease: Option<Object<'lease_alloc, ffi::TerminalHistoryLeaseImpl>>,
+    terminal: Option<Terminal<'terminal_alloc, 'cb>>,
+    checkpoint: CheckpointToken,
+    capability: CapabilityToken,
+    _not_send_or_sync: PhantomData<Rc<()>>,
+}
+
+impl<'terminal_alloc: 'cb, 'cb, 'lease_alloc>
+    LiveHistoryCursor<'terminal_alloc, 'cb, 'lease_alloc>
+{
+    unsafe fn new_inner(
+        terminal: Terminal<'terminal_alloc, 'cb>,
+        allocator: *const ffi::Allocator,
+        screen: ScreenKey,
+    ) -> Result<Self> {
+        let terminal_raw = terminal.inner.as_raw();
+        let mut lease_raw = ffi::TerminalHistoryLeaseResult {
+            size: std::mem::size_of::<ffi::TerminalHistoryLeaseResult>(),
+            version: ABI_VERSION,
+            ..Default::default()
+        };
+        let status = unsafe {
+            ffi::ghostty_terminal_history_lease_new(
+                allocator,
+                terminal_raw,
+                screen.0,
+                &raw mut lease_raw,
+            )
+        };
+        if let Err(error) = from_status(status, 0, 0) {
+            if !lease_raw.lease.is_null() {
+                unsafe { ffi::ghostty_terminal_history_lease_free(lease_raw.lease) };
+            }
+            return Err(error);
+        }
+        let lease = match Object::new(lease_raw.lease) {
+            Ok(lease) => lease,
+            Err(_) => return Err(Error::OutOfMemory),
+        };
+
+        let mut cursor_raw = ffi::TerminalHistoryCursorResult {
+            size: std::mem::size_of::<ffi::TerminalHistoryCursorResult>(),
+            version: ABI_VERSION,
+            ..Default::default()
+        };
+        let status = unsafe {
+            ffi::ghostty_terminal_history_lease_cursor(
+                lease.as_raw(),
+                terminal_raw,
+                &raw mut cursor_raw,
+            )
+        };
+        if let Err(error) = from_status(status, 0, 0) {
+            if !cursor_raw.cursor.is_null() {
+                unsafe { ffi::ghostty_terminal_history_cursor_free(cursor_raw.cursor) };
+            }
+            unsafe { ffi::ghostty_terminal_history_lease_free(lease.as_raw()) };
+            return Err(error);
+        }
+        let cursor = match Object::new(cursor_raw.cursor) {
+            Ok(cursor) => cursor,
+            Err(_) => {
+                unsafe { ffi::ghostty_terminal_history_lease_free(lease.as_raw()) };
+                return Err(Error::OutOfMemory);
+            }
+        };
+
+        Ok(Self {
+            cursor: Some(cursor),
+            lease: Some(lease),
+            terminal: Some(terminal),
+            checkpoint: CheckpointToken::new(lease_raw.checkpoint),
+            capability: CapabilityToken::new(cursor_raw.capability),
+            _not_send_or_sync: PhantomData,
+        })
+    }
+
+    /// Borrow the live terminal for read-only queries.
+    pub fn terminal(&self) -> &Terminal<'terminal_alloc, 'cb> {
+        self.terminal
+            .as_ref()
+            .expect("live history cursor always owns its terminal")
+    }
+
+    /// Mutably borrow the live terminal for serialized VT writes or mutation.
+    ///
+    /// Ordinary VT writes preserve the copy-on-write history cut. Reset and
+    /// resize deliberately invalidate it and are reported by [`Self::next`].
+    pub fn terminal_mut(&mut self) -> &mut Terminal<'terminal_alloc, 'cb> {
+        self.terminal
+            .as_mut()
+            .expect("live history cursor always owns its terminal")
+    }
+
+    /// Return the opaque authenticated checkpoint for this cut.
+    pub fn checkpoint(&self) -> &CheckpointToken {
+        &self.checkpoint
+    }
+
+    /// Return this cursor's opaque engine capability.
+    pub fn capability(&self) -> &CapabilityToken {
+        &self.capability
+    }
+
+    /// Emit one newest-first bounded unit without blocking controlled live
+    /// terminal mutation between calls.
+    pub fn next<'buffer>(
+        &mut self,
+        options: HistoryOptions,
+        buffer: &'buffer mut [u8],
+    ) -> Result<HistoryEvent<'buffer>> {
+        let cursor = self
+            .cursor
+            .as_ref()
+            .expect("live history cursor handle remains present");
+        let terminal = self
+            .terminal
+            .as_ref()
+            .expect("live history cursor always owns its terminal");
+        history_cursor_next(cursor.as_raw(), terminal.inner.as_raw(), options, buffer)
+    }
+
+    /// Release cursor and lease state, returning the still-live terminal.
+    pub fn into_terminal(mut self) -> Terminal<'terminal_alloc, 'cb> {
+        self.release_handles();
+        self.terminal
+            .take()
+            .expect("live history cursor always owns its terminal")
+    }
+
+    fn release_handles(&mut self) {
+        if let Some(cursor) = self.cursor.take() {
+            unsafe { ffi::ghostty_terminal_history_cursor_free(cursor.as_raw()) };
+        }
+        if let Some(lease) = self.lease.take() {
+            unsafe { ffi::ghostty_terminal_history_lease_free(lease.as_raw()) };
+        }
+    }
+}
+
+impl Drop for LiveHistoryCursor<'_, '_, '_> {
+    fn drop(&mut self) {
+        self.release_handles();
     }
 }
 
@@ -1710,6 +1901,75 @@ mod tests {
         destination.vt_write(b"after commit");
     }
 
+    #[test]
+    fn owned_live_cursor_pages_while_source_accepts_vt_writes() {
+        if !capabilities().expect("capabilities").authenticated_tokens {
+            return;
+        }
+        let mut source = terminal(20, 4);
+        for row in 0..200 {
+            source.vt_write(format!("row-{row:03}\r\n").as_bytes());
+        }
+        let encoded = source.encode_snapshot().expect("control snapshot");
+        let mut control = Terminal::decode_snapshot(&encoded)
+            .expect("control terminal")
+            .terminal;
+
+        let mut live = source
+            .into_live_history_cursor(ScreenKey::PRIMARY)
+            .expect("owned live cursor");
+        let checkpoint = *live.checkpoint().as_bytes();
+        let capability = *live.capability().as_bytes();
+        assert_eq!(live.checkpoint().as_bytes(), &checkpoint);
+        assert_eq!(live.capability().as_bytes(), &capability);
+
+        let mut units = 0;
+        let mut wrote_live = false;
+        loop {
+            let required = match live.next(HistoryOptions::default(), &mut []) {
+                Ok(HistoryEvent::End) => break,
+                Err(Error::OutOfSpace {
+                    required_bytes,
+                    required_rows: 0,
+                }) => required_bytes,
+                other => panic!("owned history probe: {other:?}"),
+            };
+            let mut unit = vec![0; required];
+            assert!(matches!(
+                live.next(HistoryOptions::default(), &mut unit)
+                    .expect("owned history unit"),
+                HistoryEvent::Unit { .. }
+            ));
+            units += 1;
+            if !wrote_live {
+                let input = b"live while source history pages\r\n";
+                live.terminal_mut().vt_write(input);
+                control.vt_write(input);
+                wrote_live = true;
+            }
+        }
+        assert!(units > 1);
+        assert!(wrote_live);
+
+        let source = live.into_terminal();
+        let actual = source.encode_snapshot().expect("live source snapshot");
+        let expected = control.encode_snapshot().expect("control snapshot");
+        assert_eq!(actual.as_ref(), expected.as_ref());
+        drop(actual);
+        drop(expected);
+
+        let mut invalidated = source
+            .into_live_history_cursor(ScreenKey::PRIMARY)
+            .expect("second owned live cursor");
+        invalidated.terminal_mut().reset();
+        let mut unit = [0; 4096];
+        assert!(matches!(
+            invalidated.next(HistoryOptions::default(), &mut unit),
+            Err(Error::Reset)
+        ));
+        drop(invalidated.into_terminal());
+    }
+
     fn raw_history_cursor(
         terminal: ffi::Terminal,
     ) -> (ffi::TerminalHistoryLease, ffi::TerminalHistoryCursor) {
@@ -1978,6 +2238,26 @@ mod tests {
             assert_eq!(state.active.get(), 2);
             drop(cursor);
             assert_eq!(state.active.get(), 0);
+
+            state.calls.set(0);
+            state.fail_after.set(1);
+            assert_eq!(
+                terminal(20, 4)
+                    .into_live_history_cursor_with_alloc(&allocator, ScreenKey::PRIMARY,)
+                    .unwrap_err(),
+                Error::OutOfMemory
+            );
+            assert_eq!(state.active.get(), 0);
+
+            state.calls.set(0);
+            state.fail_after.set(usize::MAX);
+            let live = terminal(20, 4)
+                .into_live_history_cursor_with_alloc(&allocator, ScreenKey::PRIMARY)
+                .expect("allocator-owned live cursor");
+            assert_eq!(state.active.get(), 2);
+            let terminal = live.into_terminal();
+            assert_eq!(state.active.get(), 0);
+            drop(terminal);
         }
     }
 
