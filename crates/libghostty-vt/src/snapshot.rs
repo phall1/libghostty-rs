@@ -14,6 +14,43 @@ use crate::{
     terminal::Terminal,
 };
 
+/// Immutable compatibility and feature metadata for the linked snapshot codec.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct SnapshotCapabilities {
+    /// Lowest accepted snapshot envelope version, inclusive.
+    pub min_decode_version: u16,
+    /// Highest accepted snapshot envelope version, inclusive.
+    pub max_decode_version: u16,
+    /// Envelope version emitted by [`Terminal::encode_snapshot`].
+    pub default_encode_version: u16,
+    /// Default encoding preserves the live VT parser continuation.
+    pub continuation: bool,
+    /// Default encoding has an authenticated renderable READY boundary.
+    pub ready: bool,
+    /// Default encoding carries history after READY.
+    pub history: bool,
+}
+
+/// Query the snapshot codec linked into this process.
+///
+/// Consumers negotiate these values before exchanging opaque snapshot bytes;
+/// they never need to parse an envelope themselves.
+pub fn capabilities() -> Result<SnapshotCapabilities> {
+    let mut raw = ffi::TerminalSnapshotCapabilities {
+        size: std::mem::size_of::<ffi::TerminalSnapshotCapabilities>(),
+        ..Default::default()
+    };
+    from_result(unsafe { ffi::ghostty_terminal_snapshot_capabilities(&raw mut raw) })?;
+    Ok(SnapshotCapabilities {
+        min_decode_version: raw.min_decode_version,
+        max_decode_version: raw.max_decode_version,
+        default_encode_version: raw.default_encode_version,
+        continuation: raw.continuation,
+        ready: raw.ready,
+        history: raw.history,
+    })
+}
+
 /// An encoded whole-terminal snapshot owned by libghostty's allocator.
 ///
 /// This is a zero-copy owner for the allocation returned by
@@ -222,6 +259,21 @@ mod tests {
         let a = a.encode_snapshot().expect("first terminal should encode");
         let b = b.encode_snapshot().expect("second terminal should encode");
         assert_eq!(a.as_ref(), b.as_ref());
+    }
+
+    #[test]
+    fn reports_linked_codec_capabilities() {
+        assert_eq!(
+            capabilities().expect("capability query"),
+            SnapshotCapabilities {
+                min_decode_version: 1,
+                max_decode_version: 2,
+                default_encode_version: 2,
+                continuation: true,
+                ready: true,
+                history: true,
+            },
+        );
     }
 
     #[test]

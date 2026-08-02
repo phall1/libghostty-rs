@@ -2564,6 +2564,45 @@ unsafe extern "C" {
         out: *mut PointCoordinate,
     ) -> Result::Type;
 }
+#[doc = " Immutable compatibility and feature metadata for the complete snapshot codec."]
+#[repr(C)]
+#[derive(Debug, Default, Copy, Clone)]
+pub struct TerminalSnapshotCapabilities {
+    pub size: usize,
+    pub min_decode_version: u16,
+    pub max_decode_version: u16,
+    pub default_encode_version: u16,
+    pub continuation: bool,
+    pub ready: bool,
+    pub history: bool,
+}
+#[allow(clippy::unnecessary_operation, clippy::identity_op)]
+const _: () = {
+    ["Size of TerminalSnapshotCapabilities"]
+        [::std::mem::size_of::<TerminalSnapshotCapabilities>() - 24usize];
+    ["Alignment of TerminalSnapshotCapabilities"]
+        [::std::mem::align_of::<TerminalSnapshotCapabilities>() - 8usize];
+    ["Offset of field: TerminalSnapshotCapabilities::size"]
+        [::std::mem::offset_of!(TerminalSnapshotCapabilities, size) - 0usize];
+    ["Offset of field: TerminalSnapshotCapabilities::min_decode_version"]
+        [::std::mem::offset_of!(TerminalSnapshotCapabilities, min_decode_version) - 8usize];
+    ["Offset of field: TerminalSnapshotCapabilities::max_decode_version"]
+        [::std::mem::offset_of!(TerminalSnapshotCapabilities, max_decode_version) - 10usize];
+    ["Offset of field: TerminalSnapshotCapabilities::default_encode_version"]
+        [::std::mem::offset_of!(TerminalSnapshotCapabilities, default_encode_version) - 12usize];
+    ["Offset of field: TerminalSnapshotCapabilities::continuation"]
+        [::std::mem::offset_of!(TerminalSnapshotCapabilities, continuation) - 14usize];
+    ["Offset of field: TerminalSnapshotCapabilities::ready"]
+        [::std::mem::offset_of!(TerminalSnapshotCapabilities, ready) - 15usize];
+    ["Offset of field: TerminalSnapshotCapabilities::history"]
+        [::std::mem::offset_of!(TerminalSnapshotCapabilities, history) - 16usize];
+};
+unsafe extern "C" {
+    #[doc = " Return immutable complete-snapshot codec compatibility and feature metadata."]
+    pub fn ghostty_terminal_snapshot_capabilities(
+        out_capabilities: *mut TerminalSnapshotCapabilities,
+    ) -> Result::Type;
+}
 #[doc = " Allocator-owned bytes for one complete encoded terminal snapshot.\n\n Initialize `size` to `sizeof(GhosttyTerminalSnapshot)`. On success, release\n `data` with ghostty_free() using the same allocator passed to encode.\n"]
 #[repr(C)]
 #[derive(Debug, Default, Copy, Clone)]
