@@ -4,12 +4,7 @@
 //! complete native record into a caller-owned buffer; it never parses or
 //! rewrites Ghostty's codec payloads.
 
-use std::{
-    fmt,
-    marker::PhantomData,
-    ptr::NonNull,
-    rc::Rc,
-};
+use std::{fmt, marker::PhantomData, ptr::NonNull, rc::Rc};
 
 use crate::{
     alloc::{Allocator, Object},
@@ -576,10 +571,7 @@ impl<'alloc> Decoder<'alloc> {
         unsafe { Self::new_inner(allocator.to_raw(), options) }
     }
 
-    unsafe fn new_inner(
-        allocator: *const ffi::Allocator,
-        options: DecoderOptions,
-    ) -> Result<Self> {
+    unsafe fn new_inner(allocator: *const ffi::Allocator, options: DecoderOptions) -> Result<Self> {
         let mut raw = std::ptr::null_mut();
         let raw_options = options.raw();
         let status = unsafe {
@@ -738,9 +730,7 @@ pub struct ReadyDecoder<'alloc> {
 
 impl<'alloc> ReadyDecoder<'alloc> {
     /// Transfer the READY terminal exactly once.
-    pub fn take_terminal<'cb>(
-        self,
-    ) -> Result<ContinuationDecoder<'alloc, 'cb>>
+    pub fn take_terminal<'cb>(self) -> Result<ContinuationDecoder<'alloc, 'cb>>
     where
         'alloc: 'cb,
     {
@@ -792,7 +782,9 @@ pub struct ContinuationDecoder<'alloc: 'cb, 'cb> {
 
 impl<'alloc: 'cb, 'cb> ContinuationDecoder<'alloc, 'cb> {
     /// Replay the authenticated parser continuation exactly once.
-    pub fn replay(self) -> std::result::Result<DecodedStream<'alloc, 'cb>, ContinuationFailure<'alloc, 'cb>> {
+    pub fn replay(
+        self,
+    ) -> std::result::Result<DecodedStream<'alloc, 'cb>, ContinuationFailure<'alloc, 'cb>> {
         let status = unsafe {
             ffi::ghostty_terminal_snapshot_decoder_replay_continuation(
                 self.core.inner.as_raw(),
@@ -874,12 +866,14 @@ impl<'alloc: 'cb, 'cb> DecodedStream<'alloc, 'cb> {
         }
         let progress = DecodeProgress::from(raw);
         match raw.kind {
-            ffi::TerminalSnapshotDecodeEventKind::NEED_INPUT => {
-                Ok(AfterReadyStep::NeedInput { decoder: self, progress })
-            }
-            ffi::TerminalSnapshotDecodeEventKind::PROGRESS => {
-                Ok(AfterReadyStep::Progress { decoder: self, progress })
-            }
+            ffi::TerminalSnapshotDecodeEventKind::NEED_INPUT => Ok(AfterReadyStep::NeedInput {
+                decoder: self,
+                progress,
+            }),
+            ffi::TerminalSnapshotDecodeEventKind::PROGRESS => Ok(AfterReadyStep::Progress {
+                decoder: self,
+                progress,
+            }),
             ffi::TerminalSnapshotDecodeEventKind::HISTORY_BEGIN => {
                 Ok(AfterReadyStep::HistoryBegin {
                     decoder: self,
@@ -888,16 +882,14 @@ impl<'alloc: 'cb, 'cb> DecodedStream<'alloc, 'cb> {
                     count: raw.count,
                 })
             }
-            ffi::TerminalSnapshotDecodeEventKind::HISTORY_PAGE => {
-                Ok(AfterReadyStep::HistoryPage {
-                    decoder: self,
-                    progress,
-                    screen: ScreenKey(raw.screen_key),
-                    index: raw.index,
-                    count: raw.count,
-                    retained: raw.retained,
-                })
-            }
+            ffi::TerminalSnapshotDecodeEventKind::HISTORY_PAGE => Ok(AfterReadyStep::HistoryPage {
+                decoder: self,
+                progress,
+                screen: ScreenKey(raw.screen_key),
+                index: raw.index,
+                count: raw.count,
+                retained: raw.retained,
+            }),
             ffi::TerminalSnapshotDecodeEventKind::FINISH => {
                 let DecodedStream {
                     mut core,
@@ -1080,12 +1072,7 @@ impl<'terminal, 'alloc> HistoryLease<'terminal, 'alloc> {
             ..Default::default()
         };
         let status = unsafe {
-            ffi::ghostty_terminal_history_lease_new(
-                allocator,
-                terminal,
-                screen.0,
-                &raw mut raw,
-            )
+            ffi::ghostty_terminal_history_lease_new(allocator, terminal, screen.0, &raw mut raw)
         };
         if let Err(error) = from_status(status, 0, 0) {
             if !raw.lease.is_null() {
@@ -1329,11 +1316,7 @@ impl<'source, 'destination, 'lease_alloc, 'import_alloc>
     }
 
     /// Import one complete authenticated unit without retaining its bytes.
-    pub fn push(
-        &mut self,
-        unit: &[u8],
-        options: HistoryOptions,
-    ) -> Result<HistoryImportEvent> {
+    pub fn push(&mut self, unit: &[u8], options: HistoryOptions) -> Result<HistoryImportEvent> {
         let mut raw = ffi::TerminalHistoryImportEvent {
             size: std::mem::size_of::<ffi::TerminalHistoryImportEvent>(),
             version: ABI_VERSION,
@@ -1364,11 +1347,7 @@ impl<'source, 'destination, 'lease_alloc, 'import_alloc>
     /// Feed live VT bytes to the borrowed destination between history pushes.
     pub fn vt_write(&mut self, data: &[u8]) {
         unsafe {
-            ffi::ghostty_terminal_vt_write(
-                self.destination.as_ptr(),
-                data.as_ptr(),
-                data.len(),
-            )
+            ffi::ghostty_terminal_vt_write(self.destination.as_ptr(), data.as_ptr(), data.len())
         }
     }
 
@@ -1419,7 +1398,6 @@ impl Drop for HistoryImporter<'_, '_, '_, '_> {
 mod tests {
     use super::*;
     use std::{cell::Cell, ffi::c_void};
-
 
     #[test]
     fn reports_incremental_codec_identity_and_bounds() {
@@ -1691,10 +1669,7 @@ mod tests {
 
     fn raw_history_cursor(
         terminal: ffi::Terminal,
-    ) -> (
-        ffi::TerminalHistoryLease,
-        ffi::TerminalHistoryCursor,
-    ) {
+    ) -> (ffi::TerminalHistoryLease, ffi::TerminalHistoryCursor) {
         let mut lease = ffi::TerminalHistoryLeaseResult {
             size: std::mem::size_of::<ffi::TerminalHistoryLeaseResult>(),
             version: ABI_VERSION,
@@ -1720,11 +1695,7 @@ mod tests {
         };
         from_status(
             unsafe {
-                ffi::ghostty_terminal_history_lease_cursor(
-                    lease.lease,
-                    terminal,
-                    &raw mut cursor,
-                )
+                ffi::ghostty_terminal_history_lease_cursor(lease.lease, terminal, &raw mut cursor)
             },
             0,
             0,
@@ -1733,10 +1704,7 @@ mod tests {
         (lease.lease, cursor.cursor)
     }
 
-    fn raw_cursor_next(
-        cursor: ffi::TerminalHistoryCursor,
-        terminal: ffi::Terminal,
-    ) -> Result<()> {
+    fn raw_cursor_next(cursor: ffi::TerminalHistoryCursor, terminal: ffi::Terminal) -> Result<()> {
         let options = HistoryOptions::default().raw();
         let mut event = ffi::TerminalHistoryEvent {
             size: std::mem::size_of::<ffi::TerminalHistoryEvent>(),
@@ -1950,11 +1918,7 @@ mod tests {
             assert_eq!(state.active.get(), 2);
             let mut destination = terminal(20, 4);
             let importer = cursor
-                .importer_with_alloc(
-                    &allocator,
-                    &mut destination,
-                    HistoryOptions::default(),
-                )
+                .importer_with_alloc(&allocator, &mut destination, HistoryOptions::default())
                 .expect("allocator-owned importer");
             assert_eq!(state.active.get(), 3);
             drop(importer);
