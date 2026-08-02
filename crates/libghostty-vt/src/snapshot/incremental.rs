@@ -520,6 +520,24 @@ impl<'terminal_alloc: 'cb, 'cb> Terminal<'terminal_alloc, 'cb> {
     ) -> Result<LiveHistoryCursor<'terminal_alloc, 'cb, 'lease_alloc>> {
         unsafe { LiveHistoryCursor::new_inner(self, allocator.to_raw(), screen) }
     }
+
+    /// Consume this terminal into a bounded multi-client live history manager.
+    pub fn into_live_history_set(
+        self,
+        capacity: usize,
+    ) -> Result<LiveHistorySet<'terminal_alloc, 'cb, 'static>> {
+        LiveHistorySet::new_inner(self, std::ptr::null(), capacity)
+    }
+
+    /// Consume this terminal into a multi-client manager using `allocator` for
+    /// every native lease and cursor owned by the set.
+    pub fn into_live_history_set_with_alloc<'lease_alloc, 'ctx: 'lease_alloc>(
+        self,
+        allocator: &'lease_alloc Allocator<'ctx>,
+        capacity: usize,
+    ) -> Result<LiveHistorySet<'terminal_alloc, 'cb, 'lease_alloc>> {
+        LiveHistorySet::new_inner(self, allocator.to_raw(), capacity)
+    }
 }
 
 impl<'terminal, 'alloc> Capture<'terminal, 'alloc> {
@@ -1559,6 +1577,436 @@ impl Drop for LiveHistoryCursor<'_, '_, '_> {
     }
 }
 
+/// Opaque transport credentials for one manager-owned history cut.
+///
+/// The bytes may be echoed back to [`LiveHistorySet::next`] or
+/// [`LiveHistorySet::release`], but cannot construct native tokens or handles.
+#[derive(Clone, Copy, Eq, PartialEq)]
+pub struct LiveHistoryCut {
+    screen: ScreenKey,
+    checkpoint: [u8; TOKEN_LEN],
+    capability: [u8; TOKEN_LEN],
+}
+
+impl LiveHistoryCut {
+    /// Screen whose history is pinned by this cut.
+    pub fn screen(&self) -> ScreenKey {
+        self.screen
+    }
+
+    /// Opaque authenticated history checkpoint bytes.
+    pub fn checkpoint(&self) -> &[u8; TOKEN_LEN] {
+        &self.checkpoint
+    }
+
+    /// Opaque capability bytes used to address this manager-owned cursor.
+    pub fn capability(&self) -> &[u8; TOKEN_LEN] {
+        &self.capability
+    }
+}
+
+impl fmt::Debug for LiveHistoryCut {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("LiveHistoryCut")
+            .field("screen", &self.screen)
+            .field("checkpoint", &"<opaque>")
+            .field("capability", &"<opaque>")
+            .finish()
+    }
+}
+
+#[derive(Debug)]
+struct LiveHistorySetEntry<'alloc> {
+    cursor: Option<Object<'alloc, ffi::TerminalHistoryCursorImpl>>,
+    lease: Option<Object<'alloc, ffi::TerminalHistoryLeaseImpl>>,
+    screen: ScreenKey,
+    checkpoint: CheckpointToken,
+    capability: CapabilityToken,
+}
+
+impl<'alloc> LiveHistorySetEntry<'alloc> {
+    unsafe fn new(
+        allocator: *const ffi::Allocator,
+        terminal: ffi::Terminal,
+        screen: ScreenKey,
+    ) -> Result<Self> {
+        let mut lease_raw = ffi::TerminalHistoryLeaseResult {
+            size: std::mem::size_of::<ffi::TerminalHistoryLeaseResult>(),
+            version: ABI_VERSION,
+            ..Default::default()
+        };
+        let status = unsafe {
+            ffi::ghostty_terminal_history_lease_new(
+                allocator,
+                terminal,
+                screen.0,
+                &raw mut lease_raw,
+            )
+        };
+        if let Err(error) = from_status(status, 0, 0) {
+            if !lease_raw.lease.is_null() {
+                unsafe { ffi::ghostty_terminal_history_lease_free(lease_raw.lease) };
+            }
+            return Err(error);
+        }
+        let lease = Object::new(lease_raw.lease).map_err(|_| Error::OutOfMemory)?;
+
+        let mut cursor_raw = ffi::TerminalHistoryCursorResult {
+            size: std::mem::size_of::<ffi::TerminalHistoryCursorResult>(),
+            version: ABI_VERSION,
+            ..Default::default()
+        };
+        let status = unsafe {
+            ffi::ghostty_terminal_history_lease_cursor(
+                lease.as_raw(),
+                terminal,
+                &raw mut cursor_raw,
+            )
+        };
+        if let Err(error) = from_status(status, 0, 0) {
+            if !cursor_raw.cursor.is_null() {
+                unsafe { ffi::ghostty_terminal_history_cursor_free(cursor_raw.cursor) };
+            }
+            unsafe { ffi::ghostty_terminal_history_lease_free(lease.as_raw()) };
+            return Err(error);
+        }
+        let cursor = match Object::new(cursor_raw.cursor) {
+            Ok(cursor) => cursor,
+            Err(_) => {
+                unsafe { ffi::ghostty_terminal_history_lease_free(lease.as_raw()) };
+                return Err(Error::OutOfMemory);
+            }
+        };
+
+        Ok(Self {
+            cursor: Some(cursor),
+            lease: Some(lease),
+            screen,
+            checkpoint: CheckpointToken::new(lease_raw.checkpoint),
+            capability: CapabilityToken::new(cursor_raw.capability),
+        })
+    }
+
+    fn cut(&self) -> LiveHistoryCut {
+        LiveHistoryCut {
+            screen: self.screen,
+            checkpoint: *self.checkpoint.as_bytes(),
+            capability: *self.capability.as_bytes(),
+        }
+    }
+
+    fn matches(&self, capability: &[u8; TOKEN_LEN]) -> bool {
+        self.capability
+            .as_bytes()
+            .iter()
+            .zip(capability)
+            .fold(0_u8, |difference, (actual, echoed)| {
+                difference | (actual ^ echoed)
+            })
+            == 0
+    }
+
+    fn release(&mut self) {
+        if let Some(cursor) = self.cursor.take() {
+            unsafe { ffi::ghostty_terminal_history_cursor_free(cursor.as_raw()) };
+        }
+        if let Some(lease) = self.lease.take() {
+            unsafe { ffi::ghostty_terminal_history_lease_free(lease.as_raw()) };
+        }
+    }
+}
+
+impl Drop for LiveHistorySetEntry<'_> {
+    fn drop(&mut self) {
+        self.release();
+    }
+}
+
+/// Single-thread-affine owner for one live terminal and bounded concurrent cuts.
+///
+/// No mutable terminal reference escapes this manager. Each cut is addressed
+/// only by capability bytes originally returned from [`LiveHistorySet::acquire`]
+/// or [`LiveSetCapture::ready_cut`].
+///
+/// ```compile_fail
+/// use libghostty_vt::{Terminal, TerminalOptions};
+/// use libghostty_vt::snapshot::incremental::LiveHistorySet;
+///
+/// fn cannot_replace(set: &mut LiveHistorySet<'static, 'static, 'static>) {
+///     let replacement = Terminal::new(TerminalOptions {
+///         cols: 80, rows: 24, max_scrollback: 100,
+///     }).unwrap();
+///     let _old = std::mem::replace(set.terminal(), replacement);
+/// }
+/// ```
+#[derive(Debug)]
+pub struct LiveHistorySet<'terminal_alloc: 'cb, 'cb, 'lease_alloc> {
+    entries: Vec<LiveHistorySetEntry<'lease_alloc>>,
+    terminal: Option<Terminal<'terminal_alloc, 'cb>>,
+    allocator: *const ffi::Allocator,
+    capacity: usize,
+    _not_send_or_sync: PhantomData<Rc<()>>,
+}
+
+impl<'terminal_alloc: 'cb, 'cb, 'lease_alloc> LiveHistorySet<'terminal_alloc, 'cb, 'lease_alloc> {
+    fn new_inner(
+        terminal: Terminal<'terminal_alloc, 'cb>,
+        allocator: *const ffi::Allocator,
+        capacity: usize,
+    ) -> Result<Self> {
+        if capacity == 0 {
+            return Err(Error::InvalidState);
+        }
+        let mut entries = Vec::new();
+        entries
+            .try_reserve_exact(capacity)
+            .map_err(|_| Error::OutOfMemory)?;
+        Ok(Self {
+            entries,
+            terminal: Some(terminal),
+            allocator,
+            capacity,
+            _not_send_or_sync: PhantomData,
+        })
+    }
+
+    /// Read-only access for mode, title, geometry, and render queries.
+    pub fn terminal(&self) -> &Terminal<'terminal_alloc, 'cb> {
+        self.terminal
+            .as_ref()
+            .expect("live history set always owns its terminal")
+    }
+
+    /// Number of active manager-owned cuts.
+    pub fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    /// Whether no cuts are active.
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+
+    /// Configured deterministic cut limit.
+    pub fn capacity(&self) -> usize {
+        self.capacity
+    }
+
+    /// Cuts that may be acquired before deterministic manager expiry is needed.
+    pub fn available(&self) -> usize {
+        self.capacity - self.entries.len()
+    }
+
+    /// Process live VT bytes while all existing cuts remain copy-on-write.
+    pub fn vt_write(&mut self, data: &[u8]) {
+        self.terminal
+            .as_mut()
+            .expect("live history set always owns its terminal")
+            .vt_write(data);
+    }
+
+    /// Scroll the live terminal viewport without exposing terminal ownership.
+    pub fn scroll_viewport(&mut self, scroll: ScrollViewport) {
+        self.terminal
+            .as_mut()
+            .expect("live history set always owns its terminal")
+            .scroll_viewport(scroll);
+    }
+
+    /// Resize the terminal, causing existing cuts to report native Resize.
+    pub fn resize(
+        &mut self,
+        cols: u16,
+        rows: u16,
+        cell_width_px: u32,
+        cell_height_px: u32,
+    ) -> crate::error::Result<()> {
+        self.terminal
+            .as_mut()
+            .expect("live history set always owns its terminal")
+            .resize(cols, rows, cell_width_px, cell_height_px)
+    }
+
+    /// Reset the terminal, causing existing cuts to report native Reset.
+    pub fn reset(&mut self) {
+        self.terminal
+            .as_mut()
+            .expect("live history set always owns its terminal")
+            .reset();
+    }
+
+    /// Acquire one authenticated cut without exposing its owning handles.
+    pub fn acquire(&mut self, screen: ScreenKey) -> Result<LiveHistoryCut> {
+        if self.entries.len() == self.capacity {
+            return Err(Error::LimitExceeded);
+        }
+        let terminal = self.terminal().inner.as_raw();
+        let entry = unsafe { LiveHistorySetEntry::new(self.allocator, terminal, screen) }?;
+        if self
+            .entries
+            .iter()
+            .any(|existing| existing.matches(entry.capability.as_bytes()))
+        {
+            return Err(Error::InvalidState);
+        }
+        let cut = entry.cut();
+        self.entries.push(entry);
+        Ok(cut)
+    }
+
+    /// Emit one unit for the cursor named by echoed opaque capability bytes.
+    pub fn next<'buffer>(
+        &mut self,
+        capability: &[u8; TOKEN_LEN],
+        options: HistoryOptions,
+        buffer: &'buffer mut [u8],
+    ) -> Result<HistoryEvent<'buffer>> {
+        let terminal = self.terminal().inner.as_raw();
+        let entry = self
+            .entries
+            .iter_mut()
+            .find(|entry| entry.matches(capability))
+            .ok_or(Error::InvalidHandle)?;
+        let cursor = entry
+            .cursor
+            .as_ref()
+            .expect("manager entry always owns its cursor");
+        history_cursor_next(cursor.as_raw(), terminal, options, buffer)
+    }
+
+    /// Release a known cut. Unknown or already released bytes are invalid.
+    pub fn release(&mut self, capability: &[u8; TOKEN_LEN]) -> Result<()> {
+        let index = self
+            .entries
+            .iter()
+            .position(|entry| entry.matches(capability))
+            .ok_or(Error::InvalidHandle)?;
+        drop(self.entries.swap_remove(index));
+        Ok(())
+    }
+
+    /// Atomically acquire a cut and begin capture from the same terminal state.
+    pub fn capture(
+        &mut self,
+        screen: ScreenKey,
+        options: CaptureOptions,
+    ) -> Result<LiveSetCapture<'_, 'terminal_alloc, 'cb, 'lease_alloc, 'static>> {
+        unsafe { self.capture_inner(std::ptr::null(), screen, options) }
+    }
+
+    /// Atomically acquire a cut and begin capture using `allocator` for capture
+    /// state. Manager lease/cursor state keeps its constructor allocator.
+    pub fn capture_with_alloc<'capture_alloc, 'ctx: 'capture_alloc>(
+        &mut self,
+        allocator: &'capture_alloc Allocator<'ctx>,
+        screen: ScreenKey,
+        options: CaptureOptions,
+    ) -> Result<LiveSetCapture<'_, 'terminal_alloc, 'cb, 'lease_alloc, 'capture_alloc>> {
+        unsafe { self.capture_inner(allocator.to_raw(), screen, options) }
+    }
+
+    unsafe fn capture_inner<'set, 'capture_alloc>(
+        &'set mut self,
+        allocator: *const ffi::Allocator,
+        screen: ScreenKey,
+        options: CaptureOptions,
+    ) -> Result<LiveSetCapture<'set, 'terminal_alloc, 'cb, 'lease_alloc, 'capture_alloc>> {
+        let cut = self.acquire(screen)?;
+        let terminal = self.terminal().inner.as_raw();
+        let capture: Capture<'set, 'capture_alloc> =
+            match unsafe { Capture::new_inner(allocator, terminal, options) } {
+                Ok(capture) => capture,
+                Err(error) => {
+                    self.release(cut.capability())
+                        .expect("newly acquired cut remains present");
+                    return Err(error);
+                }
+            };
+        Ok(LiveSetCapture {
+            set: self,
+            capture: Some(capture),
+            cut,
+            preserve_cut: false,
+        })
+    }
+
+    /// Release every cut and return the still-live terminal.
+    pub fn into_terminal(mut self) -> Terminal<'terminal_alloc, 'cb> {
+        self.entries.clear();
+        self.terminal
+            .take()
+            .expect("live history set always owns its terminal")
+    }
+}
+
+impl Drop for LiveHistorySet<'_, '_, '_> {
+    fn drop(&mut self) {
+        self.entries.clear();
+    }
+}
+
+/// Capture tied to an atomically retained manager history cut.
+///
+/// Dropping or aborting before READY releases the reserved cut. Once a READY
+/// event has been returned, dropping the capture preserves the cut for lookup
+/// through its echoed capability bytes.
+#[derive(Debug)]
+pub struct LiveSetCapture<'set, 'terminal_alloc: 'cb, 'cb, 'lease_alloc, 'capture_alloc> {
+    set: &'set mut LiveHistorySet<'terminal_alloc, 'cb, 'lease_alloc>,
+    capture: Option<Capture<'set, 'capture_alloc>>,
+    cut: LiveHistoryCut,
+    preserve_cut: bool,
+}
+
+impl<'set, 'terminal_alloc: 'cb, 'cb, 'lease_alloc, 'capture_alloc>
+    LiveSetCapture<'set, 'terminal_alloc, 'cb, 'lease_alloc, 'capture_alloc>
+{
+    /// Emit one complete opaque capture record with retry-safe short buffers.
+    pub fn next<'buffer>(&mut self, buffer: &'buffer mut [u8]) -> Result<CaptureEvent<'buffer>> {
+        let event = self
+            .capture
+            .as_mut()
+            .expect("live set capture remains active")
+            .next(buffer)?;
+        if matches!(&event.kind, CaptureEventKind::Ready { .. }) {
+            self.preserve_cut = true;
+        }
+        Ok(event)
+    }
+
+    /// Return the atomic history cut only after READY was emitted successfully.
+    pub fn ready_cut(&self) -> Option<&LiveHistoryCut> {
+        self.preserve_cut.then_some(&self.cut)
+    }
+
+    /// Abort capture. A cut that has not reached READY is rolled back.
+    pub fn abort(mut self) -> Result<()> {
+        let result = self
+            .capture
+            .take()
+            .expect("live set capture remains active")
+            .abort();
+        self.rollback_unready_cut();
+        result
+    }
+
+    fn rollback_unready_cut(&mut self) {
+        if !self.preserve_cut {
+            self.set
+                .release(self.cut.capability())
+                .expect("unready capture cut remains present");
+            self.preserve_cut = true;
+        }
+    }
+}
+
+impl Drop for LiveSetCapture<'_, '_, '_, '_, '_> {
+    fn drop(&mut self) {
+        drop(self.capture.take());
+        self.rollback_unready_cut();
+    }
+}
+
 /// Result of importing one complete opaque history unit.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct HistoryImportEvent {
@@ -2345,6 +2793,109 @@ mod tests {
         drop(resized.into_terminal());
     }
 
+    #[test]
+    fn live_history_set_serves_concurrent_cuts_and_atomic_ready_capture() {
+        if !capabilities().expect("capabilities").authenticated_tokens {
+            return;
+        }
+        let mut source = terminal(20, 4);
+        let mut control = terminal(20, 4);
+        for row in 0..200 {
+            let input = format!("row-{row:03}\r\n");
+            source.vt_write(input.as_bytes());
+            control.vt_write(input.as_bytes());
+        }
+
+        let mut set = source
+            .into_live_history_set(4)
+            .expect("bounded live history set");
+        assert_eq!((set.len(), set.capacity(), set.available()), (0, 4, 4));
+        let first = set.acquire(ScreenKey::PRIMARY).expect("first cut");
+        let between = b"live-between-cuts\r\n";
+        set.vt_write(between);
+        control.vt_write(between);
+        let second = set.acquire(ScreenKey::PRIMARY).expect("second cut");
+        assert_ne!(first.capability(), second.capability());
+
+        let mut capture = set
+            .capture(ScreenKey::PRIMARY, CaptureOptions::default())
+            .expect("atomic cut and capture");
+        assert!(capture.ready_cut().is_none());
+        let ready = loop {
+            let required = match capture.next(&mut []) {
+                Err(Error::OutOfSpace {
+                    required_bytes,
+                    required_rows: 0,
+                }) => required_bytes,
+                other => panic!("manager capture probe: {other:?}"),
+            };
+            let mut record = vec![0; required];
+            let event = capture
+                .next(&mut record)
+                .expect("complete manager capture record");
+            if matches!(event.kind, CaptureEventKind::Ready { .. }) {
+                break *capture
+                    .ready_cut()
+                    .expect("atomic cut exposed exactly at READY");
+            }
+        };
+        drop(capture);
+        assert_eq!((set.len(), set.available()), (3, 1));
+
+        let fourth = set.acquire(ScreenKey::PRIMARY).expect("fourth cut");
+        assert_eq!(set.acquire(ScreenKey::PRIMARY), Err(Error::LimitExceeded));
+        set.release(fourth.capability())
+            .expect("release fourth cut");
+
+        let after_ready = b"live-after-atomic-ready\r\n";
+        set.vt_write(after_ready);
+        control.vt_write(after_ready);
+        for capability in [
+            *first.capability(),
+            *second.capability(),
+            *ready.capability(),
+        ] {
+            let required = match set.next(&capability, HistoryOptions::default(), &mut []) {
+                Err(Error::OutOfSpace {
+                    required_bytes,
+                    required_rows: 0,
+                }) => required_bytes,
+                other => panic!("manager history probe: {other:?}"),
+            };
+            let mut unit = vec![0; required];
+            assert!(matches!(
+                set.next(&capability, HistoryOptions::default(), &mut unit)
+                    .expect("manager history unit"),
+                HistoryEvent::Unit { .. }
+            ));
+        }
+
+        let unknown = [0_u8; TOKEN_LEN];
+        assert!(matches!(
+            set.next(&unknown, HistoryOptions::default(), &mut []),
+            Err(Error::InvalidHandle)
+        ));
+        set.release(first.capability()).expect("release first cut");
+        assert!(matches!(
+            set.next(first.capability(), HistoryOptions::default(), &mut []),
+            Err(Error::InvalidHandle)
+        ));
+        set.release(second.capability())
+            .expect("release second cut");
+        set.release(ready.capability()).expect("release READY cut");
+        assert!(set.is_empty());
+
+        let active_before_abort = set.len();
+        set.capture(ScreenKey::PRIMARY, CaptureOptions::default())
+            .expect("pre-READY capture")
+            .abort()
+            .expect("pre-READY abort");
+        assert_eq!(set.len(), active_before_abort);
+
+        let source = set.into_terminal();
+        assert_semantically_equal(&source, &control);
+    }
+
     fn raw_history_cursor(
         terminal: ffi::Terminal,
     ) -> (ffi::TerminalHistoryLease, ffi::TerminalHistoryCursor) {
@@ -2633,6 +3184,41 @@ mod tests {
             let terminal = live.into_terminal();
             assert_eq!(state.active.get(), 0);
             drop(terminal);
+
+            let mut set = terminal(20, 4)
+                .into_live_history_set_with_alloc(&allocator, 4)
+                .expect("allocator-owned live history set");
+            state.calls.set(0);
+            state.fail_after.set(1);
+            assert_eq!(
+                set.acquire(ScreenKey::PRIMARY).unwrap_err(),
+                Error::OutOfMemory
+            );
+            assert_eq!((set.len(), state.active.get()), (0, 0));
+
+            state.calls.set(0);
+            state.fail_after.set(2);
+            assert_eq!(
+                set.capture_with_alloc(&allocator, ScreenKey::PRIMARY, CaptureOptions::default(),)
+                    .unwrap_err(),
+                Error::OutOfMemory
+            );
+            assert_eq!((set.len(), state.active.get()), (0, 0));
+
+            state.calls.set(0);
+            state.fail_after.set(usize::MAX);
+            drop(
+                set.capture_with_alloc(&allocator, ScreenKey::PRIMARY, CaptureOptions::default())
+                    .expect("allocator-owned atomic capture"),
+            );
+            assert_eq!((set.len(), state.active.get()), (0, 0));
+
+            let cut = set.acquire(ScreenKey::PRIMARY).expect("manager cut");
+            assert_eq!((set.len(), state.active.get()), (1, 2));
+            assert_eq!(set.release(cut.capability()), Ok(()));
+            assert_eq!((set.len(), state.active.get()), (0, 0));
+            drop(set);
+            assert_eq!(state.active.get(), 0);
         }
     }
 
