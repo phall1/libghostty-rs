@@ -773,6 +773,16 @@ impl<'alloc: 'cb, 'cb> Terminal<'alloc, 'cb> {
         Ok(self)
     }
 
+    /// Set the maximum scrollback allocation in bytes.
+    ///
+    /// This is an approximate page-granularity limit used alongside the
+    /// configured line limit. `None` removes the byte limit while leaving the
+    /// line limit unchanged.
+    pub fn set_scrollback_max_bytes(&mut self, max: Option<usize>) -> Result<&mut Self> {
+        self.set_optional(Opt::SCROLLBACK_MAX_BYTES, max.as_ref())?;
+        Ok(self)
+    }
+
     /// Enable or disable Glyph Protocol APC handling.
     ///
     /// Disabling the protocol makes the terminal ignore Glyph Protocol APC

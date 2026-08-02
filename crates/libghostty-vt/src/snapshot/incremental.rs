@@ -915,7 +915,9 @@ impl<'alloc: 'cb, 'cb> DecodedStream<'alloc, 'cb> {
         self.terminal.vt_write(data);
     }
 
-    /// Resize the decoded terminal, explicitly invalidating pending history.
+    /// Resize the decoded terminal. Any later snapshot history pages are
+    /// reported with `retained == false`; authenticated decoding still reaches
+    /// FINISH without replacing the resized active state.
     pub fn resize(
         &mut self,
         cols: u16,
@@ -927,9 +929,17 @@ impl<'alloc: 'cb, 'cb> DecodedStream<'alloc, 'cb> {
             .resize(cols, rows, cell_width_px, cell_height_px)
     }
 
-    /// Reset the decoded terminal, explicitly invalidating pending history.
+    /// Reset the decoded terminal. Any later snapshot history pages are
+    /// reported with `retained == false`; authenticated decoding still reaches
+    /// FINISH without replacing the reset active state.
     pub fn reset(&mut self) {
         self.terminal.reset();
+    }
+
+    /// Set the decoded terminal's scrollback byte limit without moving it.
+    pub fn set_scrollback_max_bytes(&mut self, max: Option<usize>) -> crate::error::Result<()> {
+        self.terminal.set_scrollback_max_bytes(max)?;
+        Ok(())
     }
 
     /// Consume an arbitrary fragment after READY.
@@ -1461,6 +1471,15 @@ impl<'terminal_alloc: 'cb, 'cb, 'lease_alloc>
             .vt_write(data);
     }
 
+    /// Set the owned terminal's scrollback byte limit without moving it.
+    pub fn set_scrollback_max_bytes(&mut self, max: Option<usize>) -> crate::error::Result<()> {
+        self.terminal
+            .as_mut()
+            .expect("live history cursor always owns its terminal")
+            .set_scrollback_max_bytes(max)?;
+        Ok(())
+    }
+
     /// Resize the owned terminal, explicitly invalidating this history cut.
     pub fn resize(
         &mut self,
@@ -1829,13 +1848,15 @@ mod tests {
         data: &[u8],
         cut: usize,
         live_during_history: bool,
-    ) -> (Terminal<'static, 'static>, usize) {
+        unbounded_scrollback_bytes: bool,
+    ) -> (Terminal<'static, 'static>, usize, usize) {
         let mut state = DriveState::Before(
             Decoder::new(DecoderOptions::default()).expect("decoder construction"),
         );
         let mut offset = 0;
         let mut boundary = cut.min(data.len());
         let mut wrote_live = false;
+        let mut history_pages = 0;
         loop {
             if offset == boundary && boundary != data.len() {
                 boundary = data.len();
@@ -1856,9 +1877,14 @@ mod tests {
                         let continuation = decoder
                             .take_terminal::<'static>()
                             .expect("READY terminal transfer");
-                        DriveState::After(
-                            continuation.replay().expect("one-shot continuation replay"),
-                        )
+                        let mut stream =
+                            continuation.replay().expect("one-shot continuation replay");
+                        if unbounded_scrollback_bytes {
+                            stream
+                                .set_scrollback_max_bytes(None)
+                                .expect("remove decoded scrollback byte cap");
+                        }
+                        DriveState::After(stream)
                     }
                     Err(error) => panic!("decode before READY failed: {error}"),
                 },
@@ -1875,10 +1901,13 @@ mod tests {
                     Ok(AfterReadyStep::HistoryPage {
                         mut decoder,
                         progress,
+                        retained,
                         ..
                     }) => {
+                        assert!(retained);
                         assert!(progress.consumed > 0);
                         offset += progress.consumed;
+                        history_pages += 1;
                         if live_during_history && !wrote_live {
                             decoder.vt_write(b"live-between-decoded-history-pages\r\n");
                             wrote_live = true;
@@ -1887,7 +1916,7 @@ mod tests {
                     }
                     Ok(AfterReadyStep::Finish(finished)) => {
                         offset += finished.progress.consumed;
-                        return (finished.terminal, offset);
+                        return (finished.terminal, offset, history_pages);
                     }
                     Err(error) => panic!("decode after READY failed: {error}"),
                 },
@@ -1919,11 +1948,12 @@ mod tests {
                 }) => {
                     assert!(progress.consumed > 0);
                     offset += progress.consumed;
-                    break ready
-                        .take_terminal::<'static>()
-                        .expect("READY terminal")
-                        .replay()
-                        .expect("continuation replay");
+                    let continuation = ready.take_terminal::<'static>().expect("READY terminal");
+                    let mut decoded = continuation.replay().expect("continuation replay");
+                    decoded
+                        .set_scrollback_max_bytes(None)
+                        .expect("remove decoded scrollback byte cap");
+                    break decoded;
                 }
                 Err(error) => panic!("decode before READY failed: {error}"),
             }
@@ -1951,8 +1981,10 @@ mod tests {
                 Ok(AfterReadyStep::HistoryPage {
                     decoder: next,
                     progress,
+                    retained,
                     ..
                 }) => {
+                    assert!(retained);
                     assert!(progress.consumed > 0);
                     offset += progress.consumed;
                     return (next, offset);
@@ -1965,18 +1997,14 @@ mod tests {
         }
     }
 
-    fn expect_decoded_history_error(
+    fn finish_discarded_history(
         mut stream: DecodedStream<'static, 'static>,
         data: &[u8],
         mut offset: usize,
-        expected: Error,
-    ) {
+    ) -> Terminal<'static, 'static> {
+        let mut discarded = 0;
         loop {
             match stream.push(&data[offset..]) {
-                Err(failure) => {
-                    assert_eq!(failure.error, expected);
-                    return;
-                }
                 Ok(AfterReadyStep::NeedInput {
                     decoder: next,
                     progress,
@@ -1989,19 +2017,28 @@ mod tests {
                     decoder: next,
                     progress,
                     ..
-                })
-                | Ok(AfterReadyStep::HistoryPage {
-                    decoder: next,
-                    progress,
-                    ..
                 }) => {
                     assert!(progress.consumed > 0);
                     offset += progress.consumed;
                     stream = next;
                 }
-                Ok(AfterReadyStep::Finish(_)) => {
-                    panic!("invalidated decoder reached FINISH without {expected}")
+                Ok(AfterReadyStep::HistoryPage {
+                    decoder: next,
+                    progress,
+                    retained,
+                    ..
+                }) => {
+                    assert!(progress.consumed > 0);
+                    assert!(!retained);
+                    discarded += 1;
+                    offset += progress.consumed;
+                    stream = next;
                 }
+                Ok(AfterReadyStep::Finish(finished)) => {
+                    assert!(discarded > 0);
+                    return finished.terminal;
+                }
+                Err(error) => panic!("invalidated decoder failed before FINISH: {error}"),
             }
         }
     }
@@ -2015,7 +2052,7 @@ mod tests {
         let expected = source.encode_snapshot().expect("expected snapshot");
 
         for cut in 1..bytes.len() {
-            let (mut decoded, consumed) = decode_with_cut(&bytes, cut, false);
+            let (mut decoded, consumed, _) = decode_with_cut(&bytes, cut, false, false);
             assert_eq!(consumed, bytes.len(), "cut {cut}");
             decoded.vt_write(b"mred");
             let actual = decoded.encode_snapshot().expect("decoded snapshot");
@@ -2032,7 +2069,7 @@ mod tests {
         let mut transport = bytes.clone();
         transport.extend_from_slice(tail);
 
-        let (mut decoded, consumed) = decode_with_cut(&transport, 1, true);
+        let (mut decoded, consumed, _) = decode_with_cut(&transport, 1, true, false);
         assert_eq!(consumed, bytes.len());
         assert_eq!(&transport[consumed..], tail);
         decoded.vt_write(&transport[consumed..]);
@@ -2041,32 +2078,67 @@ mod tests {
     #[test]
     fn decoded_stream_accepts_live_writes_between_history_pages() {
         let mut source = terminal(20, 4);
-        for row in 0..200 {
-            source.vt_write(format!("row-{row:03}\r\n").as_bytes());
+        source
+            .set_scrollback_max_bytes(None)
+            .expect("remove source scrollback byte cap");
+        for row in 0..2000 {
+            source.vt_write(format!("row-{row:04}\r\n").as_bytes());
         }
         let bytes = capture_all(&mut source);
         let live = b"live-between-decoded-history-pages\r\n";
         source.vt_write(live);
-        let (decoded, consumed) = decode_with_cut(&bytes, 1, true);
+        let (decoded, consumed, history_pages) = decode_with_cut(&bytes, 1, true, true);
         assert_eq!(consumed, bytes.len());
+        assert!(history_pages > 1);
         assert_semantically_equal(&source, &decoded);
     }
 
     #[test]
-    fn decoded_stream_reset_and_resize_invalidate_pending_history() {
+    fn decoded_stream_reset_and_resize_discard_pending_history() {
         let mut source = terminal(20, 4);
-        for row in 0..200 {
-            source.vt_write(format!("row-{row:03}\r\n").as_bytes());
+        source
+            .set_scrollback_max_bytes(None)
+            .expect("remove source scrollback byte cap");
+        for row in 0..2000 {
+            source.vt_write(format!("row-{row:04}\r\n").as_bytes());
         }
         let bytes = capture_all(&mut source);
 
         let (mut reset, offset) = stream_after_history_page(&bytes);
         reset.reset();
-        expect_decoded_history_error(reset, &bytes, offset, Error::Reset);
+        reset.vt_write(b"active-after-reset");
+        let reset_active = semantic_terminal_bytes(reset.terminal());
+        let reset_cursor = (
+            reset.terminal().cursor_x().expect("reset cursor x"),
+            reset.terminal().cursor_y().expect("reset cursor y"),
+        );
+        let reset = finish_discarded_history(reset, &bytes, offset);
+        assert_eq!(semantic_terminal_bytes(&reset), reset_active);
+        assert_eq!(
+            (
+                reset.cursor_x().expect("finished reset cursor x"),
+                reset.cursor_y().expect("finished reset cursor y"),
+            ),
+            reset_cursor
+        );
 
         let (mut resized, offset) = stream_after_history_page(&bytes);
         resized.resize(21, 5, 0, 0).expect("decoded resize");
-        expect_decoded_history_error(resized, &bytes, offset, Error::Resize);
+        resized.vt_write(b"active-after-resize");
+        let resized_active = semantic_terminal_bytes(resized.terminal());
+        let resized_geometry = (
+            resized.terminal().cols().expect("resized cols"),
+            resized.terminal().rows().expect("resized rows"),
+        );
+        let resized = finish_discarded_history(resized, &bytes, offset);
+        assert_eq!(semantic_terminal_bytes(&resized), resized_active);
+        assert_eq!(
+            (
+                resized.cols().expect("finished resized cols"),
+                resized.rows().expect("finished resized rows"),
+            ),
+            resized_geometry
+        );
     }
 
     #[test]
