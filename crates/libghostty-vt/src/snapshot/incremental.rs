@@ -1318,6 +1318,22 @@ impl Drop for HistoryCursor<'_, '_> {
 /// paging older history. It consumes the terminal, so all mutation remains
 /// serialized through this owner. Drop and [`LiveHistoryCursor::into_terminal`]
 /// always release the cursor and lease before the terminal.
+///
+/// ```compile_fail
+/// use libghostty_vt::{Terminal, TerminalOptions};
+/// use libghostty_vt::snapshot::incremental::ScreenKey;
+///
+/// let terminal = Terminal::new(TerminalOptions {
+///     cols: 80, rows: 24, max_scrollback: 100,
+/// }).unwrap();
+/// let live = terminal.into_live_history_cursor(ScreenKey::PRIMARY).unwrap();
+/// let replacement = Terminal::new(TerminalOptions {
+///     cols: 80, rows: 24, max_scrollback: 100,
+/// }).unwrap();
+/// // The terminal is only available by shared reference, so it cannot be
+/// // replaced or dropped while native cursor and lease handles refer to it.
+/// let _old = std::mem::replace(live.terminal(), replacement);
+/// ```
 #[derive(Debug)]
 pub struct LiveHistoryCursor<'terminal_alloc: 'cb, 'cb, 'lease_alloc> {
     cursor: Option<Object<'lease_alloc, ffi::TerminalHistoryCursorImpl>>,
@@ -1405,14 +1421,34 @@ impl<'terminal_alloc: 'cb, 'cb, 'lease_alloc>
             .expect("live history cursor always owns its terminal")
     }
 
-    /// Mutably borrow the live terminal for serialized VT writes or mutation.
-    ///
-    /// Ordinary VT writes preserve the copy-on-write history cut. Reset and
-    /// resize deliberately invalidate it and are reported by [`Self::next`].
-    pub fn terminal_mut(&mut self) -> &mut Terminal<'terminal_alloc, 'cb> {
+    /// Process live VT bytes while preserving the copy-on-write history cut.
+    pub fn vt_write(&mut self, data: &[u8]) {
         self.terminal
             .as_mut()
             .expect("live history cursor always owns its terminal")
+            .vt_write(data);
+    }
+
+    /// Resize the owned terminal, explicitly invalidating this history cut.
+    pub fn resize(
+        &mut self,
+        cols: u16,
+        rows: u16,
+        cell_width_px: u32,
+        cell_height_px: u32,
+    ) -> crate::error::Result<()> {
+        self.terminal
+            .as_mut()
+            .expect("live history cursor always owns its terminal")
+            .resize(cols, rows, cell_width_px, cell_height_px)
+    }
+
+    /// Reset the owned terminal, explicitly invalidating this history cut.
+    pub fn reset(&mut self) {
+        self.terminal
+            .as_mut()
+            .expect("live history cursor always owns its terminal")
+            .reset();
     }
 
     /// Return the opaque authenticated checkpoint for this cut.
@@ -1622,6 +1658,7 @@ impl Drop for HistoryImporter<'_, '_, '_, '_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::fmt::{Format, Formatter, FormatterOptions};
     use std::{cell::Cell, ffi::c_void};
 
     #[test]
@@ -1644,6 +1681,74 @@ mod tests {
             max_scrollback: 1000,
         })
         .expect("terminal construction")
+    }
+
+    fn semantic_terminal_bytes(terminal: &Terminal<'_, '_>) -> Vec<u8> {
+        let options = FormatterOptions::new()
+            .with_format(Format::Vt)
+            .with_unwrap(false)
+            .with_trim(false)
+            .with_palette(true)
+            .with_modes(true)
+            .with_scrolling_region(true)
+            .with_tabstops(true)
+            .with_pwd(true)
+            .with_keyboard(true)
+            .with_cursor(true)
+            .with_style(true)
+            .with_hyperlink(true)
+            .with_protection(true)
+            .with_kitty_keyboard(true)
+            .with_charsets(true);
+        Formatter::new(terminal, options)
+            .expect("semantic formatter")
+            .format_alloc(None)
+            .expect("semantic terminal bytes")
+            .to_vec()
+    }
+
+    fn assert_semantically_equal(a: &Terminal<'_, '_>, b: &Terminal<'_, '_>) {
+        macro_rules! compare {
+            ($getter:ident) => {
+                assert_eq!(
+                    a.$getter().expect(stringify!($getter)),
+                    b.$getter().expect(stringify!($getter)),
+                    stringify!($getter)
+                );
+            };
+        }
+
+        compare!(cols);
+        compare!(rows);
+        compare!(width_px);
+        compare!(height_px);
+        compare!(cursor_x);
+        compare!(cursor_y);
+        compare!(is_cursor_pending_wrap);
+        compare!(is_cursor_visible);
+        compare!(cursor_style);
+        compare!(kitty_keyboard_flags);
+        compare!(active_screen);
+        compare!(viewport_active);
+        compare!(is_mouse_tracking);
+        compare!(vt_processing_error);
+        compare!(title);
+        compare!(pwd);
+        compare!(total_rows);
+        compare!(scrollback_rows);
+
+        let a_scrollbar = a.scrollbar().expect("scrollbar");
+        let b_scrollbar = b.scrollbar().expect("scrollbar");
+        assert_eq!(
+            (a_scrollbar.total, a_scrollbar.offset, a_scrollbar.len),
+            (b_scrollbar.total, b_scrollbar.offset, b_scrollbar.len),
+            "scrollbar"
+        );
+        assert_eq!(
+            semantic_terminal_bytes(a),
+            semantic_terminal_bytes(b),
+            "formatted cells, styles, row metadata, modes, and terminal extras"
+        );
     }
 
     fn capture_all(source: &mut Terminal<'static, 'static>) -> Vec<u8> {
@@ -1943,7 +2048,7 @@ mod tests {
             units += 1;
             if !wrote_live {
                 let input = b"live while source history pages\r\n";
-                live.terminal_mut().vt_write(input);
+                live.vt_write(input);
                 control.vt_write(input);
                 wrote_live = true;
             }
@@ -1952,22 +2057,27 @@ mod tests {
         assert!(wrote_live);
 
         let source = live.into_terminal();
-        let actual = source.encode_snapshot().expect("live source snapshot");
-        let expected = control.encode_snapshot().expect("control snapshot");
-        assert_eq!(actual.as_ref(), expected.as_ref());
-        drop(actual);
-        drop(expected);
+        assert_semantically_equal(&source, &control);
 
         let mut invalidated = source
             .into_live_history_cursor(ScreenKey::PRIMARY)
             .expect("second owned live cursor");
-        invalidated.terminal_mut().reset();
+        invalidated.reset();
         let mut unit = [0; 4096];
         assert!(matches!(
             invalidated.next(HistoryOptions::default(), &mut unit),
             Err(Error::Reset)
         ));
-        drop(invalidated.into_terminal());
+        let source = invalidated.into_terminal();
+        let mut resized = source
+            .into_live_history_cursor(ScreenKey::PRIMARY)
+            .expect("resize invalidation cursor");
+        resized.resize(21, 5, 0, 0).expect("owned resize");
+        assert!(matches!(
+            resized.next(HistoryOptions::default(), &mut unit),
+            Err(Error::Resize)
+        ));
+        drop(resized.into_terminal());
     }
 
     fn raw_history_cursor(
