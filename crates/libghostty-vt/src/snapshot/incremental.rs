@@ -803,7 +803,7 @@ impl<'alloc: 'cb, 'cb> ContinuationDecoder<'alloc, 'cb> {
         if let Err(error) = from_status(status, 0, 0) {
             return Err(ContinuationFailure {
                 error,
-                terminal: self.terminal,
+                decoder: self,
             });
         }
         Ok(DecodedStream {
@@ -814,13 +814,17 @@ impl<'alloc: 'cb, 'cb> ContinuationDecoder<'alloc, 'cb> {
     }
 }
 
-/// Failed continuation replay, retaining ownership of the READY terminal.
+/// Failed continuation replay retaining the complete retry-safe state.
+///
+/// The terminal is intentionally not exposed while its authenticated parser
+/// continuation is pending. Retry with [`ContinuationDecoder::replay`] through
+/// [`ContinuationFailure::decoder`].
 #[derive(Debug)]
 pub struct ContinuationFailure<'alloc: 'cb, 'cb> {
     /// Exact native error.
     pub error: Error,
-    /// Terminal transferred before replay failed.
-    pub terminal: Terminal<'alloc, 'cb>,
+    /// Decoder and READY terminal, unchanged when replay is retry-safe.
+    pub decoder: ContinuationDecoder<'alloc, 'cb>,
 }
 
 impl fmt::Display for ContinuationFailure<'_, '_> {
@@ -1850,21 +1854,32 @@ mod tests {
         false
     }
 
-    unsafe extern "C" fn no_remap(
-        _context: *mut c_void,
-        _memory: *mut c_void,
-        _memory_len: usize,
-        _alignment: u8,
-        _new_len: usize,
+    unsafe extern "C" fn fail_remap(
+        context: *mut c_void,
+        memory: *mut c_void,
+        memory_len: usize,
+        alignment: u8,
+        new_len: usize,
         _return_address: usize,
     ) -> *mut c_void {
-        std::ptr::null_mut()
+        let state = unsafe { &*context.cast::<FailState>() };
+        let call = state.calls.get();
+        state.calls.set(call + 1);
+        if call >= state.fail_after.get() {
+            return std::ptr::null_mut();
+        }
+        let Ok(layout) =
+            std::alloc::Layout::from_size_align(memory_len, 1usize << alignment)
+        else {
+            return std::ptr::null_mut();
+        };
+        unsafe { std::alloc::realloc(memory.cast(), layout, new_len).cast() }
     }
 
     static FAIL_VTABLE: ffi::AllocatorVtable = ffi::AllocatorVtable {
         alloc: Some(fail_alloc),
         resize: Some(no_resize),
-        remap: Some(no_remap),
+        remap: Some(fail_remap),
         free: Some(fail_free),
     };
 
@@ -1935,5 +1950,102 @@ mod tests {
             drop(cursor);
             assert_eq!(state.active.get(), 0);
         }
+    }
+
+    #[test]
+    fn continuation_replay_oom_preserves_state_for_retry() {
+        let mut source = terminal(20, 4);
+        source.vt_write(b"before\r\n\x1b[31");
+        let bytes = capture_all(&mut source);
+
+        let state = FailState::default();
+        state.fail_after.set(usize::MAX);
+        let allocator = failing_allocator(&state);
+        let mut decoder =
+            Decoder::new_with_alloc(&allocator, DecoderOptions::default())
+                .expect("decoder construction");
+        let mut offset = 0;
+        let ready = loop {
+            match decoder.push(&bytes[offset..]) {
+                Ok(DecodeStep::NeedInput {
+                    decoder: next,
+                    progress,
+                })
+                | Ok(DecodeStep::Progress {
+                    decoder: next,
+                    progress,
+                }) => {
+                    assert!(progress.consumed > 0);
+                    offset += progress.consumed;
+                    decoder = next;
+                }
+                Ok(DecodeStep::Ready {
+                    decoder: ready,
+                    progress,
+                }) => {
+                    assert!(progress.consumed > 0);
+                    offset += progress.consumed;
+                    break ready;
+                }
+                Err(error) => panic!("decode before READY failed: {error}"),
+            }
+        };
+        let continuation = ready
+            .take_terminal()
+            .expect("READY terminal transfer");
+
+        state.fail_after.set(state.calls.get());
+        let failure = continuation
+            .replay()
+            .expect_err("verification allocation should fail once");
+        assert_eq!(failure.error, Error::OutOfMemory);
+
+        state.fail_after.set(usize::MAX);
+        let mut stream = failure
+            .decoder
+            .replay()
+            .expect("retry should replay the untouched continuation");
+        let mut decoded = loop {
+            match stream.push(&bytes[offset..]) {
+                Ok(AfterReadyStep::NeedInput {
+                    decoder: next,
+                    progress,
+                })
+                | Ok(AfterReadyStep::Progress {
+                    decoder: next,
+                    progress,
+                })
+                | Ok(AfterReadyStep::HistoryBegin {
+                    decoder: next,
+                    progress,
+                    ..
+                })
+                | Ok(AfterReadyStep::HistoryPage {
+                    decoder: next,
+                    progress,
+                    ..
+                }) => {
+                    assert!(progress.consumed > 0);
+                    offset += progress.consumed;
+                    stream = next;
+                }
+                Ok(AfterReadyStep::Finish(finished)) => {
+                    offset += finished.progress.consumed;
+                    break finished.terminal;
+                }
+                Err(error) => panic!("decode after replay retry failed: {error}"),
+            }
+        };
+        assert_eq!(offset, bytes.len());
+
+        source.vt_write(b"mred");
+        decoded.vt_write(b"mred");
+        let expected = source.encode_snapshot().expect("source snapshot");
+        let actual = decoded.encode_snapshot().expect("retried decoder snapshot");
+        assert_eq!(actual.as_ref(), expected.as_ref());
+        drop(actual);
+        drop(expected);
+        drop(decoded);
+        assert_eq!(state.active.get(), 0);
     }
 }
