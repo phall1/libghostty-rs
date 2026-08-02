@@ -522,20 +522,30 @@ impl<'terminal_alloc: 'cb, 'cb> Terminal<'terminal_alloc, 'cb> {
     }
 
     /// Consume this terminal into a bounded multi-client live history manager.
+    ///
+    /// Construction failure returns the unchanged terminal in
+    /// [`LiveHistorySetFailure`].
     pub fn into_live_history_set(
         self,
         capacity: usize,
-    ) -> Result<LiveHistorySet<'terminal_alloc, 'cb, 'static>> {
+    ) -> Result<
+        LiveHistorySet<'terminal_alloc, 'cb, 'static>,
+        LiveHistorySetFailure<'terminal_alloc, 'cb>,
+    > {
         LiveHistorySet::new_inner(self, std::ptr::null(), capacity)
     }
 
     /// Consume this terminal into a multi-client manager using `allocator` for
-    /// every native lease and cursor owned by the set.
+    /// every native lease and cursor owned by the set. Construction failure
+    /// returns the unchanged terminal.
     pub fn into_live_history_set_with_alloc<'lease_alloc, 'ctx: 'lease_alloc>(
         self,
         allocator: &'lease_alloc Allocator<'ctx>,
         capacity: usize,
-    ) -> Result<LiveHistorySet<'terminal_alloc, 'cb, 'lease_alloc>> {
+    ) -> Result<
+        LiveHistorySet<'terminal_alloc, 'cb, 'lease_alloc>,
+        LiveHistorySetFailure<'terminal_alloc, 'cb>,
+    > {
         LiveHistorySet::new_inner(self, allocator.to_raw(), capacity)
     }
 }
@@ -1722,6 +1732,23 @@ impl Drop for LiveHistorySetEntry<'_> {
     }
 }
 
+/// Lossless failure to construct a [`LiveHistorySet`].
+#[derive(Debug)]
+pub struct LiveHistorySetFailure<'terminal_alloc: 'cb, 'cb> {
+    /// Exact construction error.
+    pub error: Error,
+    /// Original terminal, unchanged and still live.
+    pub terminal: Terminal<'terminal_alloc, 'cb>,
+}
+
+impl fmt::Display for LiveHistorySetFailure<'_, '_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.error.fmt(f)
+    }
+}
+
+impl std::error::Error for LiveHistorySetFailure<'_, '_> {}
+
 /// Single-thread-affine owner for one live terminal and bounded concurrent cuts.
 ///
 /// No mutable terminal reference escapes this manager. Each cut is addressed
@@ -1753,14 +1780,20 @@ impl<'terminal_alloc: 'cb, 'cb, 'lease_alloc> LiveHistorySet<'terminal_alloc, 'c
         terminal: Terminal<'terminal_alloc, 'cb>,
         allocator: *const ffi::Allocator,
         capacity: usize,
-    ) -> Result<Self> {
+    ) -> Result<Self, LiveHistorySetFailure<'terminal_alloc, 'cb>> {
         if capacity == 0 {
-            return Err(Error::InvalidState);
+            return Err(LiveHistorySetFailure {
+                error: Error::InvalidState,
+                terminal,
+            });
         }
         let mut entries = Vec::new();
-        entries
-            .try_reserve_exact(capacity)
-            .map_err(|_| Error::OutOfMemory)?;
+        if entries.try_reserve_exact(capacity).is_err() {
+            return Err(LiveHistorySetFailure {
+                error: Error::OutOfMemory,
+                terminal,
+            });
+        }
         Ok(Self {
             entries,
             terminal: Some(terminal),
@@ -2894,6 +2927,29 @@ mod tests {
 
         let source = set.into_terminal();
         assert_semantically_equal(&source, &control);
+    }
+
+    #[test]
+    fn live_history_set_construction_failure_returns_unchanged_terminal() {
+        let mut source = terminal(20, 4);
+        let mut control = terminal(20, 4);
+        source.vt_write(b"canonical-before-manager");
+        control.vt_write(b"canonical-before-manager");
+
+        let failure = source
+            .into_live_history_set(usize::MAX)
+            .expect_err("impossible reservation");
+        assert_eq!(failure.error, Error::OutOfMemory);
+        let mut recovered = failure.terminal;
+        recovered.vt_write(b"-still-live");
+        control.vt_write(b"-still-live");
+        assert_semantically_equal(&recovered, &control);
+
+        let failure = recovered
+            .into_live_history_set(0)
+            .expect_err("zero capacity");
+        assert_eq!(failure.error, Error::InvalidState);
+        assert_semantically_equal(&failure.terminal, &control);
     }
 
     fn raw_history_cursor(
