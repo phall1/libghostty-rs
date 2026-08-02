@@ -1868,8 +1868,7 @@ mod tests {
         if call >= state.fail_after.get() {
             return std::ptr::null_mut();
         }
-        let Ok(layout) =
-            std::alloc::Layout::from_size_align(memory_len, 1usize << alignment)
+        let Ok(layout) = std::alloc::Layout::from_size_align(memory_len, 1usize << alignment)
         else {
             return std::ptr::null_mut();
         };
@@ -1961,9 +1960,8 @@ mod tests {
         let state = FailState::default();
         state.fail_after.set(usize::MAX);
         let allocator = failing_allocator(&state);
-        let mut decoder =
-            Decoder::new_with_alloc(&allocator, DecoderOptions::default())
-                .expect("decoder construction");
+        let mut decoder = Decoder::new_with_alloc(&allocator, DecoderOptions::default())
+            .expect("decoder construction");
         let mut offset = 0;
         let ready = loop {
             match decoder.push(&bytes[offset..]) {
@@ -1990,9 +1988,7 @@ mod tests {
                 Err(error) => panic!("decode before READY failed: {error}"),
             }
         };
-        let continuation = ready
-            .take_terminal()
-            .expect("READY terminal transfer");
+        let continuation = ready.take_terminal().expect("READY terminal transfer");
 
         state.fail_after.set(state.calls.get());
         let failure = continuation
