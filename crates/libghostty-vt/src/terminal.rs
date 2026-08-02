@@ -245,16 +245,6 @@ pub struct Options {
     pub max_scrollback: usize,
 }
 
-impl From<Options> for ffi::TerminalOptions {
-    fn from(value: Options) -> Self {
-        Self {
-            cols: value.cols,
-            rows: value.rows,
-            max_scrollback: value.max_scrollback,
-        }
-    }
-}
-
 /// Default visual style used when the cursor style is reset.
 #[repr(u32)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, int_enum::IntEnum)]
@@ -291,8 +281,23 @@ impl<'alloc: 'cb, 'cb> Terminal<'alloc, 'cb> {
 
     unsafe fn new_inner(alloc: *const ffi::Allocator, opts: Options) -> Result<Self> {
         let mut raw: ffi::Terminal = std::ptr::null_mut();
-        let result = unsafe { ffi::ghostty_terminal_new(alloc, &raw mut raw, opts.into()) };
+        let result =
+            unsafe { ffi::ghostty_terminal_new(alloc, &raw mut raw, opts.cols, opts.rows) };
         from_result(result)?;
+
+        // The synced C API configures scrollback after construction rather
+        // than taking it in the constructor. Build the owning wrapper first so
+        // a failed option update still frees the native terminal exactly once.
+        let terminal = unsafe { Self::from_raw(raw) }?;
+        terminal.set(Opt::SCROLLBACK_MAX_LINES, &opts.max_scrollback)?;
+        Ok(terminal)
+    }
+
+    /// Take ownership of a terminal handle returned by libghostty.
+    ///
+    /// The handle must be non-NULL, uniquely owned, and allocated by an API
+    /// whose terminal lifetime is tied to `'alloc`.
+    pub(crate) unsafe fn from_raw(raw: ffi::Terminal) -> Result<Self> {
         Ok(Self {
             inner: Object::new(raw)?,
             vtable: Box::new(VTable::default()),

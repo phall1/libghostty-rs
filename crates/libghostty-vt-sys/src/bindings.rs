@@ -2019,28 +2019,6 @@ unsafe extern "C" {
         out_info: *mut KittyGraphicsPlacementRenderInfo,
     ) -> Result::Type;
 }
-#[doc = " Terminal initialization options.\n"]
-#[repr(C)]
-#[derive(Debug, Default, Copy, Clone)]
-pub struct TerminalOptions {
-    #[doc = " Terminal width in cells. Must be greater than zero."]
-    pub cols: u16,
-    #[doc = " Terminal height in cells. Must be greater than zero."]
-    pub rows: u16,
-    #[doc = " Maximum number of lines to keep in scrollback history."]
-    pub max_scrollback: usize,
-}
-#[allow(clippy::unnecessary_operation, clippy::identity_op)]
-const _: () = {
-    ["Size of TerminalOptions"][::std::mem::size_of::<TerminalOptions>() - 16usize];
-    ["Alignment of TerminalOptions"][::std::mem::align_of::<TerminalOptions>() - 8usize];
-    ["Offset of field: TerminalOptions::cols"]
-        [::std::mem::offset_of!(TerminalOptions, cols) - 0usize];
-    ["Offset of field: TerminalOptions::rows"]
-        [::std::mem::offset_of!(TerminalOptions, rows) - 2usize];
-    ["Offset of field: TerminalOptions::max_scrollback"]
-        [::std::mem::offset_of!(TerminalOptions, max_scrollback) - 8usize];
-};
 pub mod TerminalCompressionMode {
     #[doc = " Amount of compression work to perform before returning.\n"]
     pub type Type = ::std::os::raw::c_uint;
@@ -2392,6 +2370,10 @@ pub mod TerminalOption {
     pub const PWD_CHANGED: Type = 25;
     #[doc = " Callback invoked when the running program performs a clipboard write.\n OSC 52 and iTerm2 OSC 1337 Copy writes are normalized to an atomic set\n of decoded MIME representations. Set to NULL to ignore clipboard writes.\n Clipboard read requests are always ignored; see\n GhosttyTerminalClipboardWriteFn.\n\n Input type: GhosttyTerminalClipboardWriteFn"]
     pub const CLIPBOARD_WRITE: Type = 26;
+    #[doc = " Set the maximum scrollback allocation in bytes.\n\n A value of zero disables scrollback and erases retained history.\n A NULL value pointer removes the byte limit.\n\n Input type: size_t*"]
+    pub const SCROLLBACK_MAX_BYTES: Type = 27;
+    #[doc = " Set the maximum number of physical lines retained in scrollback.\n\n A NULL value pointer removes the line limit.\n\n Input type: size_t*"]
+    pub const SCROLLBACK_MAX_LINES: Type = 28;
     #[doc = " Callback invoked when the running program performs a clipboard write.\n OSC 52 and iTerm2 OSC 1337 Copy writes are normalized to an atomic set\n of decoded MIME representations. Set to NULL to ignore clipboard writes.\n Clipboard read requests are always ignored; see\n GhosttyTerminalClipboardWriteFn.\n\n Input type: GhosttyTerminalClipboardWriteFn"]
     pub const MAX_VALUE: Type = 2147483647;
 }
@@ -2470,11 +2452,12 @@ pub mod TerminalData {
     pub const MAX_VALUE: Type = 2147483647;
 }
 unsafe extern "C" {
-    #[doc = " Create a new terminal instance.\n\n"]
+    #[doc = " Create a new terminal instance.\n\n The terminal starts with reasonable defaults. Use ghostty_terminal_set()\n to change options before processing terminal input.\n\n"]
     pub fn ghostty_terminal_new(
         allocator: *const Allocator,
         terminal: *mut Terminal,
-        options: TerminalOptions,
+        cols: u16,
+        rows: u16,
     ) -> Result::Type;
 }
 unsafe extern "C" {
@@ -2579,6 +2562,63 @@ unsafe extern "C" {
         ref_: *const GridRef,
         tag: PointTag::Type,
         out: *mut PointCoordinate,
+    ) -> Result::Type;
+}
+#[doc = " Allocator-owned bytes for one complete encoded terminal snapshot.\n\n Initialize `size` to `sizeof(GhosttyTerminalSnapshot)`. On success, release\n `data` with ghostty_free() using the same allocator passed to encode.\n"]
+#[repr(C)]
+#[derive(Debug, Default, Copy, Clone)]
+pub struct TerminalSnapshot {
+    pub size: usize,
+    pub data: *mut u8,
+    pub len: usize,
+}
+#[allow(clippy::unnecessary_operation, clippy::identity_op)]
+const _: () = {
+    ["Size of TerminalSnapshot"][::std::mem::size_of::<TerminalSnapshot>() - 24usize];
+    ["Alignment of TerminalSnapshot"][::std::mem::align_of::<TerminalSnapshot>() - 8usize];
+    ["Offset of field: TerminalSnapshot::size"]
+        [::std::mem::offset_of!(TerminalSnapshot, size) - 0usize];
+    ["Offset of field: TerminalSnapshot::data"]
+        [::std::mem::offset_of!(TerminalSnapshot, data) - 8usize];
+    ["Offset of field: TerminalSnapshot::len"]
+        [::std::mem::offset_of!(TerminalSnapshot, len) - 16usize];
+};
+#[doc = " Result of restoring exactly one complete terminal snapshot.\n\n On success, `terminal` is fully usable and `consumed` reports the bytes\n through the snapshot FINISH record. Trailing bytes remain unprocessed.\n"]
+#[repr(C)]
+#[derive(Debug, Default, Copy, Clone)]
+pub struct TerminalSnapshotDecodeResult {
+    pub size: usize,
+    pub terminal: Terminal,
+    pub consumed: usize,
+}
+#[allow(clippy::unnecessary_operation, clippy::identity_op)]
+const _: () = {
+    ["Size of TerminalSnapshotDecodeResult"]
+        [::std::mem::size_of::<TerminalSnapshotDecodeResult>() - 24usize];
+    ["Alignment of TerminalSnapshotDecodeResult"]
+        [::std::mem::align_of::<TerminalSnapshotDecodeResult>() - 8usize];
+    ["Offset of field: TerminalSnapshotDecodeResult::size"]
+        [::std::mem::offset_of!(TerminalSnapshotDecodeResult, size) - 0usize];
+    ["Offset of field: TerminalSnapshotDecodeResult::terminal"]
+        [::std::mem::offset_of!(TerminalSnapshotDecodeResult, terminal) - 8usize];
+    ["Offset of field: TerminalSnapshotDecodeResult::consumed"]
+        [::std::mem::offset_of!(TerminalSnapshotDecodeResult, consumed) - 16usize];
+};
+unsafe extern "C" {
+    #[doc = " Encode a terminal and its live VT stream continuation as one complete\n allocator-owned snapshot.\n"]
+    pub fn ghostty_terminal_snapshot_encode(
+        allocator: *const Allocator,
+        terminal: Terminal,
+        out_snapshot: *mut TerminalSnapshot,
+    ) -> Result::Type;
+}
+unsafe extern "C" {
+    #[doc = " Decode exactly one complete snapshot from the start of `data`.\n\n Trailing bytes are allowed and reported through `out_result.consumed`.\n"]
+    pub fn ghostty_terminal_snapshot_decode(
+        allocator: *const Allocator,
+        data: *const u8,
+        len: usize,
+        out_result: *mut TerminalSnapshotDecodeResult,
     ) -> Result::Type;
 }
 #[doc = " Extra screen state to include in styled output.\n"]

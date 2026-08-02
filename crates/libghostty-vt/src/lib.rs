@@ -108,6 +108,7 @@ pub mod render;
 pub mod screen;
 pub mod selection;
 pub mod sgr;
+pub mod snapshot;
 pub mod style;
 pub mod unicode;
 
@@ -116,6 +117,7 @@ pub use crate::{
     error::Error,
     log::{Logger, set_logger},
     render::RenderState,
+    snapshot::{DecodedSnapshot, EncodedSnapshot},
     terminal::{Options as TerminalOptions, Terminal},
 };
 
