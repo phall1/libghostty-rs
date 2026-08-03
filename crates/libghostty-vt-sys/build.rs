@@ -76,7 +76,7 @@ fn main() {
     println!("cargo:rerun-if-env-changed=GHOSTTY_ZIG_SYSTEM_DIR");
     println!("cargo:rerun-if-env-changed=TARGET");
     println!("cargo:rerun-if-env-changed=HOST");
-    println!("cargo:rerun-if-env-changed=DEBUG");
+    println!("cargo:rerun-if-env-changed=CARGO_CFG_DEBUG_ASSERTIONS");
     println!("cargo:rerun-if-env-changed=OPT_LEVEL");
     println!("cargo:rerun-if-changed=crates/libghostty-vt-sys/build.rs");
 
@@ -321,9 +321,8 @@ fn emit_include_metadata(include_paths: &[PathBuf]) {
 /// values are the four Zig `OptimizeMode` names (`Debug`, `ReleaseSafe`, `ReleaseFast`,
 /// `ReleaseSmall`).
 ///
-/// Defaults to `ReleaseFast` for optimized builds. If `DEBUG` is `true` (as cargo sets for the
-/// `dev` profile), `Debug` mode is used. Otherwise, if `OPT_LEVEL` is `s` or `z`, `ReleaseSmall`
-/// is used.
+/// Defaults to `ReleaseFast` for optimized builds. If target debug assertions are enabled,
+/// `Debug` mode is used. Otherwise, if `OPT_LEVEL` is `s` or `z`, `ReleaseSmall` is used.
 fn zig_optimize_mode() -> &'static str {
     if let Ok(override_mode) = env::var("LIBGHOSTTY_VT_SYS_OPTIMIZE") {
         return match override_mode.as_str() {
@@ -337,7 +336,7 @@ fn zig_optimize_mode() -> &'static str {
         };
     }
 
-    if env::var("DEBUG").as_deref() == Ok("true") {
+    if env::var_os("CARGO_CFG_DEBUG_ASSERTIONS").is_some() {
         return "Debug";
     }
 
