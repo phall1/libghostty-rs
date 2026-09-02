@@ -273,19 +273,13 @@ pub enum Format {
 mod tests {
     use super::*;
     use crate::{
-        TerminalOptions,
         selection::Selection,
         terminal::{Point, PointCoordinate},
     };
 
     #[test]
     fn formatter_formats_borrowed_selection() {
-        let mut terminal = Terminal::new(TerminalOptions {
-            cols: 8,
-            rows: 3,
-            max_scrollback: 0,
-        })
-        .expect("terminal should initialize");
+        let mut terminal = Terminal::new(8, 3).expect("terminal should initialize");
         terminal.vt_write(b"abcdef");
 
         let start = terminal

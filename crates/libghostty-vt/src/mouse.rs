@@ -436,7 +436,7 @@ pub enum Button {
 #[cfg(test)]
 mod snapshot_tests {
     use super::*;
-    use crate::{Terminal, TerminalOptions};
+    use crate::Terminal;
 
     fn assert_send<T: Send>() {}
 
@@ -454,12 +454,7 @@ mod snapshot_tests {
             &b"\x1b[?1000h\x1b[?1002h\x1b[?1006h"[..],
             &b"\x1b[?1000h\x1b[?1002h\x1b[?1003h\x1b[?1006h\x1b[?1016h"[..],
         ] {
-            let mut terminal = Terminal::new(TerminalOptions {
-                cols: 80,
-                rows: 24,
-                max_scrollback: 0,
-            })
-            .expect("terminal");
+            let mut terminal = Terminal::new(80, 24).expect("terminal");
             terminal.vt_write(modes);
             let options = EncoderOptions::from_terminal(&terminal).expect("capture");
 

@@ -726,15 +726,10 @@ bitflags::bitflags! {
 #[cfg(test)]
 mod snapshot_tests {
     use super::*;
-    use crate::{Terminal, TerminalOptions};
+    use crate::Terminal;
 
     fn terminal_with_modes() -> Terminal<'static, 'static> {
-        let mut terminal = Terminal::new(TerminalOptions {
-            cols: 80,
-            rows: 24,
-            max_scrollback: 0,
-        })
-        .expect("terminal");
+        let mut terminal = Terminal::new(80, 24).expect("terminal");
         terminal.vt_write(b"\x1b[?1h\x1b[?66h\x1b[?1035h\x1b[?1036h\x1b[?67h\x1b[>4;2m\x1b[>31u");
         terminal
     }
