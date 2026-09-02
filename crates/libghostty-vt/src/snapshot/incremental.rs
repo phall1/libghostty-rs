@@ -341,13 +341,14 @@ impl Default for DetachOptions {
 }
 
 impl DetachOptions {
-    fn raw(self) -> ffi::TerminalSnapshotDetachOptions {
+    fn raw(self, leased: bool) -> ffi::TerminalSnapshotDetachOptions {
         ffi::TerminalSnapshotDetachOptions {
             size: std::mem::size_of::<ffi::TerminalSnapshotDetachOptions>(),
             version: ABI_VERSION,
             max_pages: self.max_pages,
             max_total_bytes: self.max_total_bytes,
             max_rows: self.max_rows,
+            leased,
         }
     }
 }
@@ -503,9 +504,68 @@ impl<'terminal, 'alloc> Capture<'terminal, 'alloc> {
         mut self,
         options: DetachOptions,
     ) -> Result<CaptureContinuation<'alloc>, CaptureDetachFailure<Self>> {
+        let inner = match self.detach_inner(options, false) {
+            Ok(inner) => inner,
+            Err(error) => {
+                return Err(CaptureDetachFailure {
+                    error,
+                    capture: self,
+                });
+            }
+        };
+        std::mem::forget(self);
+        Ok(CaptureContinuation {
+            inner,
+            active: true,
+            _not_send_or_sync: PhantomData,
+        })
+    }
+
+    /// Pin all records after an already-delivered READY event without encoding
+    /// them.
+    ///
+    /// This costs the same however deep the retained history is: the records
+    /// stay in the terminal's own pages under a copy-on-write lease and are
+    /// encoded one per [`LeasedContinuation::next`]. Peak memory is one page
+    /// rather than the whole encoded history.
+    ///
+    /// Like [`Self::detach_ready`] the transition is transactional and the
+    /// source terminal may be mutated immediately. Unlike it, the terminal must
+    /// outlive the returned continuation, and history pruned out from under the
+    /// lease before it is delivered fails the stream with [`Error::Pruned`]
+    /// rather than yielding stale bytes.
+    pub fn detach_ready_leased(
+        mut self,
+        options: DetachOptions,
+    ) -> Result<LeasedContinuation<'terminal, 'alloc>, CaptureDetachFailure<Self>> {
+        let inner = match self.detach_inner(options, true) {
+            Ok(inner) => inner,
+            Err(error) => {
+                return Err(CaptureDetachFailure {
+                    error,
+                    capture: self,
+                });
+            }
+        };
+        std::mem::forget(self);
+        Ok(LeasedContinuation {
+            inner,
+            active: true,
+            _terminal: PhantomData,
+            _not_send_or_sync: PhantomData,
+        })
+    }
+
+    /// Perform the native detach, leaving `self` inert on success so the
+    /// caller can forget it without running the aborting `Drop`.
+    fn detach_inner(
+        &mut self,
+        options: DetachOptions,
+        leased: bool,
+    ) -> Result<Object<'alloc, ffi::TerminalSnapshotContinuationImpl>> {
         let mut capture = self.inner.as_raw();
         let mut continuation = std::ptr::null_mut();
-        let raw_options = options.raw();
+        let raw_options = options.raw(leased);
         let status = unsafe {
             ffi::ghostty_terminal_snapshot_capture_detach_ready(
                 &mut capture,
@@ -513,21 +573,10 @@ impl<'terminal, 'alloc> Capture<'terminal, 'alloc> {
                 &mut continuation,
             )
         };
-        if let Err(error) = from_status(status, 0, 0) {
-            return Err(CaptureDetachFailure {
-                error,
-                capture: self,
-            });
-        }
+        from_status(status, 0, 0)?;
         self.active = false;
-        let inner = Object::new(continuation)
-            .expect("Ghostty returned success with a null snapshot continuation");
-        std::mem::forget(self);
-        Ok(CaptureContinuation {
-            inner,
-            active: true,
-            _not_send_or_sync: PhantomData,
-        })
+        Ok(Object::new(continuation)
+            .expect("Ghostty returned success with a null snapshot continuation"))
     }
 
 
@@ -579,18 +628,7 @@ impl<'alloc> CaptureContinuation<'alloc> {
         options: ContinuationOptions,
         buffer: &'buffer mut [u8],
     ) -> Result<CaptureEvent<'buffer>> {
-        let raw_options = options.raw();
-        let mut raw = empty_capture_event();
-        let status = unsafe {
-            ffi::ghostty_terminal_snapshot_continuation_next(
-                self.inner.as_raw(),
-                &raw_options,
-                buffer.as_mut_ptr(),
-                buffer.len(),
-                &raw mut raw,
-            )
-        };
-        capture_event(status, raw, buffer)
+        continuation_next(self.inner.as_raw(), options, buffer)
     }
 
     /// Abort without emitting remaining history or FINISH.
@@ -612,6 +650,78 @@ impl Drop for CaptureContinuation<'_> {
         }
         unsafe { ffi::ghostty_terminal_snapshot_continuation_free(self.inner.as_raw()) };
     }
+}
+
+/// Lease-pinned owner of all snapshot records after READY.
+///
+/// The counterpart of [`CaptureContinuation`] for
+/// [`Capture::detach_ready_leased`]: nothing was encoded at detachment, so the
+/// source terminal must stay alive until this value is dropped. Mutating it is
+/// fine -- the lease holds the historical cut copy-on-write -- but history the
+/// terminal prunes before this continuation reaches it fails the stream with
+/// [`Error::Pruned`].
+#[derive(Debug)]
+pub struct LeasedContinuation<'terminal, 'alloc> {
+    inner: Object<'alloc, ffi::TerminalSnapshotContinuationImpl>,
+    active: bool,
+    _terminal: PhantomData<&'terminal ()>,
+    _not_send_or_sync: PhantomData<Rc<()>>,
+}
+
+impl LeasedContinuation<'_, '_> {
+    /// Encode and emit one complete record into `buffer`.
+    ///
+    /// Byte or row shortage is nonadvancing and reports exact requirements, as
+    /// with [`CaptureContinuation::next`]. The encoding itself happens here
+    /// rather than at detachment, so this is where a stale, pruned, reset, or
+    /// resized history cut is reported.
+    pub fn next<'buffer>(
+        &mut self,
+        options: ContinuationOptions,
+        buffer: &'buffer mut [u8],
+    ) -> Result<CaptureEvent<'buffer>> {
+        continuation_next(self.inner.as_raw(), options, buffer)
+    }
+
+    /// Abort without emitting remaining history or FINISH.
+    pub fn abort(mut self) -> Result<()> {
+        self.active = false;
+        from_status(
+            unsafe { ffi::ghostty_terminal_snapshot_continuation_abort(self.inner.as_raw()) },
+            0,
+            0,
+        )
+    }
+}
+
+impl Drop for LeasedContinuation<'_, '_> {
+    fn drop(&mut self) {
+        if self.active {
+            let _ =
+                unsafe { ffi::ghostty_terminal_snapshot_continuation_abort(self.inner.as_raw()) };
+        }
+        unsafe { ffi::ghostty_terminal_snapshot_continuation_free(self.inner.as_raw()) };
+    }
+}
+
+/// One bounded record from either continuation shape.
+fn continuation_next<'buffer>(
+    continuation: ffi::TerminalSnapshotContinuation,
+    options: ContinuationOptions,
+    buffer: &'buffer mut [u8],
+) -> Result<CaptureEvent<'buffer>> {
+    let raw_options = options.raw();
+    let mut raw = empty_capture_event();
+    let status = unsafe {
+        ffi::ghostty_terminal_snapshot_continuation_next(
+            continuation,
+            &raw_options,
+            buffer.as_mut_ptr(),
+            buffer.len(),
+            &raw mut raw,
+        )
+    };
+    capture_event(status, raw, buffer)
 }
 
 
@@ -2551,6 +2661,125 @@ mod tests {
             }
         }
         all
+    }
+
+    /// The leased detachment costs nothing at READY and still delivers a
+    /// stream that decodes to the captured state.
+    ///
+    /// The half this cannot show is the one the lease exists for: that the
+    /// source may be written to between records. `'terminal` here is the
+    /// region of the `&mut` borrow `Terminal::capture` took, so safe code
+    /// cannot touch the source while the continuation lives. A caller that
+    /// owns both -- the way [`LiveHistorySet`] owns its terminal and mediates
+    /// every access to it -- can, and does; there is no borrow to conflict
+    /// with, because a continuation holds engine state, never a Rust
+    /// reference to the terminal.
+    #[test]
+    fn leased_capture_costs_nothing_at_ready_and_round_trips() {
+        let mut source = terminal(80, 4);
+        source
+            .set_scrollback_max_bytes(None)
+            .expect("unbounded source scrollback");
+        for row in 0..1000 {
+            source.vt_write(format!("leased-{row:04}\r\n").as_bytes());
+        }
+        let control_bytes = source.encode_snapshot().expect("control snapshot");
+        let control = Terminal::decode_snapshot(&control_bytes)
+            .expect("control decode")
+            .terminal;
+
+        let capture_options = CaptureOptions {
+            max_pages: 64,
+            ..CaptureOptions::default()
+        };
+        let mut capture = source
+            .capture(capture_options)
+            .expect("capture construction");
+        let mut snapshot_bytes = Vec::new();
+        loop {
+            let required = match capture.next(&mut []) {
+                Err(Error::OutOfSpace {
+                    required_bytes,
+                    required_rows: 0,
+                }) => required_bytes,
+                other => panic!("capture byte probe: {other:?}"),
+            };
+            let mut record = vec![0; required];
+            let event = capture.next(&mut record).expect("capture record");
+            let ready = matches!(event.kind, CaptureEventKind::Ready { .. });
+            assert_eq!(event.rows, 0);
+            snapshot_bytes.extend_from_slice(event.record);
+            if ready {
+                break;
+            }
+        }
+
+        let detach_options = DetachOptions {
+            max_pages: 4096,
+            max_total_bytes: 64 * 1024 * 1024,
+            max_rows: 64,
+        };
+        let leased_at = std::time::Instant::now();
+        let mut continuation = capture
+            .detach_ready_leased(detach_options)
+            .map_err(|failure| failure.error)
+            .expect("leased READY detachment");
+        let leased_cost = leased_at.elapsed();
+        assert!(
+            leased_cost < std::time::Duration::from_millis(5),
+            "leasing encodes nothing, so it cannot take {leased_cost:?}"
+        );
+
+        let mut history_rows = 0;
+        let mut records = 0;
+        loop {
+            let mut record = vec![0; capture_options.max_record_bytes];
+            let event = continuation
+                .next(ContinuationOptions { max_rows: 64 }, &mut record)
+                .expect("leased continuation delivery");
+            assert!(event.rows <= 64);
+            if matches!(event.kind, CaptureEventKind::HistoryPage { .. }) {
+                assert!(event.rows > 0);
+                history_rows += event.rows;
+            } else {
+                assert_eq!(event.rows, 0);
+            }
+            let finished = matches!(event.kind, CaptureEventKind::Finish);
+            snapshot_bytes.extend_from_slice(event.record);
+            records += 1;
+            if finished {
+                break;
+            }
+        }
+        assert!(records > 3, "history arrived in one record, proving nothing");
+        assert!(history_rows > 500, "many small-byte blank rows were charged");
+
+        let decoded = Terminal::decode_snapshot(&snapshot_bytes)
+            .expect("leased snapshot decode")
+            .terminal;
+        // The active area is the cut, not the live terminal: everything written
+        // during the drain landed after READY and must not appear here.
+        assert_eq!(decoded.cols().expect("cols"), control.cols().expect("cols"));
+        assert_eq!(decoded.rows().expect("rows"), control.rows().expect("rows"));
+        assert_eq!(
+            decoded.cursor_y().expect("cursor_y"),
+            control.cursor_y().expect("cursor_y")
+        );
+        let decoded_scrollback = decoded.scrollback_rows().expect("scrollback rows");
+        let control_scrollback = control.scrollback_rows().expect("control scrollback");
+        assert!(
+            history_rows >= decoded_scrollback,
+            "decode invented history: {decoded_scrollback} rows from {history_rows} delivered"
+        );
+        // A lease walks rows where the borrowed encoder walks whole pages, so
+        // it can carry history that shared a page with the active area. It can
+        // never carry less: whatever the whole-page walk reached, the lease's
+        // oldest-node boundary reaches too.
+        assert!(
+            history_rows >= control_scrollback,
+            "leased history delivered {history_rows} rows where the whole-page \
+             walk reached {control_scrollback}"
+        );
     }
 
     #[test]

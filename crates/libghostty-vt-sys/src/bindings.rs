@@ -4673,11 +4673,20 @@ pub struct TerminalSnapshotDetachOptions {
     pub max_total_bytes: usize,
     #[doc = " Inclusive rows represented by any owned PAGE record."]
     pub max_rows: usize,
+    #[doc = " Pin retained history through a copy-on-write lease and encode each"]
+    #[doc = " record on demand instead of owning every record up front."]
+    #[doc = ""]
+    #[doc = " Leased detachment costs the same however deep the scrollback is and"]
+    #[doc = " retains one page at a time rather than the whole encoded history, but"]
+    #[doc = " the source terminal must then outlive the continuation. It may still be"]
+    #[doc = " mutated freely; a page pruned before it is delivered fails the stream"]
+    #[doc = " with PRUNED rather than delivering stale bytes."]
+    pub leased: bool,
 }
 #[allow(clippy::unnecessary_operation, clippy::identity_op)]
 const _: () = {
     ["Size of TerminalSnapshotDetachOptions"]
-        [::std::mem::size_of::<TerminalSnapshotDetachOptions>() - 40usize];
+        [::std::mem::size_of::<TerminalSnapshotDetachOptions>() - 48usize];
     ["Alignment of TerminalSnapshotDetachOptions"]
         [::std::mem::align_of::<TerminalSnapshotDetachOptions>() - 8usize];
     ["Offset of field: TerminalSnapshotDetachOptions::size"]
@@ -4690,6 +4699,8 @@ const _: () = {
         [::std::mem::offset_of!(TerminalSnapshotDetachOptions, max_total_bytes) - 24usize];
     ["Offset of field: TerminalSnapshotDetachOptions::max_rows"]
         [::std::mem::offset_of!(TerminalSnapshotDetachOptions, max_rows) - 32usize];
+    ["Offset of field: TerminalSnapshotDetachOptions::leased"]
+        [::std::mem::offset_of!(TerminalSnapshotDetachOptions, leased) - 40usize];
 };
 #[doc = " Per-call delivery limits for a terminal-independent continuation."]
 #[repr(C)]
