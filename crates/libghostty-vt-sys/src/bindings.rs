@@ -3200,6 +3200,120 @@ unsafe extern "C" {
         out_written: *mut usize,
     ) -> Result::Type;
 }
+#[doc = " One cell's worth of render data, filled by\n ghostty_render_state_row_cells_get_all().\n\n Text lives out of line in the batch's text buffer so this record stays\n small enough that a whole row of them fits in cache.\n"]
+#[repr(C)]
+#[derive(Debug, Default, Copy, Clone)]
+pub struct RenderStateRowCellEntry {
+    #[doc = " Byte offset of this cell's UTF-8 grapheme cluster within the batch's\n text buffer."]
+    pub text_offset: u32,
+    #[doc = " Byte length of the cluster. Zero when the cell has no text."]
+    pub text_len: u32,
+    #[doc = " Index of this cell's style within the batch's styles array. Always\n zero when the caller passed a NULL styles array."]
+    pub style_index: u32,
+    #[doc = " The resolved foreground color. Only meaningful when has_fg is true."]
+    pub fg: ColorRgb,
+    #[doc = " The resolved background color. Only meaningful when has_bg is true."]
+    pub bg: ColorRgb,
+    #[doc = " Whether fg holds a resolved foreground color. False means the cell has\n no explicit foreground and the caller should use its own default."]
+    pub has_fg: bool,
+    #[doc = " Whether bg holds a resolved background color. False means the cell has\n no explicit background and the caller should use its own default."]
+    pub has_bg: bool,
+    #[doc = " Whether the cell carries a non-default style entry."]
+    pub has_styling: bool,
+    #[doc = " Whether the cell falls inside the row's selection range."]
+    pub selected: bool,
+    #[doc = " The cell's GhosttyCellWide value, narrowed to a byte."]
+    pub wide: u8,
+    pub reserved: u8,
+}
+#[allow(clippy::unnecessary_operation, clippy::identity_op)]
+const _: () = {
+    ["Size of RenderStateRowCellEntry"][::std::mem::size_of::<RenderStateRowCellEntry>() - 24usize];
+    ["Alignment of RenderStateRowCellEntry"]
+        [::std::mem::align_of::<RenderStateRowCellEntry>() - 4usize];
+    ["Offset of field: RenderStateRowCellEntry::text_offset"]
+        [::std::mem::offset_of!(RenderStateRowCellEntry, text_offset) - 0usize];
+    ["Offset of field: RenderStateRowCellEntry::text_len"]
+        [::std::mem::offset_of!(RenderStateRowCellEntry, text_len) - 4usize];
+    ["Offset of field: RenderStateRowCellEntry::style_index"]
+        [::std::mem::offset_of!(RenderStateRowCellEntry, style_index) - 8usize];
+    ["Offset of field: RenderStateRowCellEntry::fg"]
+        [::std::mem::offset_of!(RenderStateRowCellEntry, fg) - 12usize];
+    ["Offset of field: RenderStateRowCellEntry::bg"]
+        [::std::mem::offset_of!(RenderStateRowCellEntry, bg) - 15usize];
+    ["Offset of field: RenderStateRowCellEntry::has_fg"]
+        [::std::mem::offset_of!(RenderStateRowCellEntry, has_fg) - 18usize];
+    ["Offset of field: RenderStateRowCellEntry::has_bg"]
+        [::std::mem::offset_of!(RenderStateRowCellEntry, has_bg) - 19usize];
+    ["Offset of field: RenderStateRowCellEntry::has_styling"]
+        [::std::mem::offset_of!(RenderStateRowCellEntry, has_styling) - 20usize];
+    ["Offset of field: RenderStateRowCellEntry::selected"]
+        [::std::mem::offset_of!(RenderStateRowCellEntry, selected) - 21usize];
+    ["Offset of field: RenderStateRowCellEntry::wide"]
+        [::std::mem::offset_of!(RenderStateRowCellEntry, wide) - 22usize];
+    ["Offset of field: RenderStateRowCellEntry::reserved"]
+        [::std::mem::offset_of!(RenderStateRowCellEntry, reserved) - 23usize];
+};
+#[doc = " In/out parameter block for ghostty_render_state_row_cells_get_all().\n\n The caller owns every buffer; the function only writes into them.\n\n This is a sized struct. Use GHOSTTY_INIT_SIZED() to initialize it.\n"]
+#[repr(C)]
+#[derive(Debug, Copy, Clone)]
+pub struct RenderStateRowCellsBatch {
+    #[doc = " Size of this struct in bytes. Must be set by the caller."]
+    pub size: usize,
+    #[doc = " Array receiving one entry per cell in the row, in column order."]
+    pub entries: *mut RenderStateRowCellEntry,
+    #[doc = " Capacity of entries, in elements."]
+    pub entries_cap: usize,
+    #[doc = " Array receiving the row's styles, deduplicated by style id: a new entry\n is appended only where a cell's style differs from the preceding cell's.\n May be NULL to skip style materialization, in which case every entry's\n style_index is zero and styles_len is zero."]
+    pub styles: *mut Style,
+    #[doc = " Capacity of styles, in elements."]
+    pub styles_cap: usize,
+    #[doc = " Buffer receiving every cell's UTF-8 grapheme cluster, laid out back to\n back in column order. Each entry's text_offset/text_len indexes into it."]
+    pub text: Buffer,
+    #[doc = " Number of entries written, or the required entry capacity when the call\n returns GHOSTTY_OUT_OF_SPACE."]
+    pub entries_len: usize,
+    #[doc = " Number of styles written, or the required style capacity when the call\n returns GHOSTTY_OUT_OF_SPACE."]
+    pub styles_len: usize,
+}
+#[allow(clippy::unnecessary_operation, clippy::identity_op)]
+const _: () = {
+    ["Size of RenderStateRowCellsBatch"]
+        [::std::mem::size_of::<RenderStateRowCellsBatch>() - 80usize];
+    ["Alignment of RenderStateRowCellsBatch"]
+        [::std::mem::align_of::<RenderStateRowCellsBatch>() - 8usize];
+    ["Offset of field: RenderStateRowCellsBatch::size"]
+        [::std::mem::offset_of!(RenderStateRowCellsBatch, size) - 0usize];
+    ["Offset of field: RenderStateRowCellsBatch::entries"]
+        [::std::mem::offset_of!(RenderStateRowCellsBatch, entries) - 8usize];
+    ["Offset of field: RenderStateRowCellsBatch::entries_cap"]
+        [::std::mem::offset_of!(RenderStateRowCellsBatch, entries_cap) - 16usize];
+    ["Offset of field: RenderStateRowCellsBatch::styles"]
+        [::std::mem::offset_of!(RenderStateRowCellsBatch, styles) - 24usize];
+    ["Offset of field: RenderStateRowCellsBatch::styles_cap"]
+        [::std::mem::offset_of!(RenderStateRowCellsBatch, styles_cap) - 32usize];
+    ["Offset of field: RenderStateRowCellsBatch::text"]
+        [::std::mem::offset_of!(RenderStateRowCellsBatch, text) - 40usize];
+    ["Offset of field: RenderStateRowCellsBatch::entries_len"]
+        [::std::mem::offset_of!(RenderStateRowCellsBatch, entries_len) - 64usize];
+    ["Offset of field: RenderStateRowCellsBatch::styles_len"]
+        [::std::mem::offset_of!(RenderStateRowCellsBatch, styles_len) - 72usize];
+};
+impl Default for RenderStateRowCellsBatch {
+    fn default() -> Self {
+        let mut s = ::std::mem::MaybeUninit::<Self>::uninit();
+        unsafe {
+            ::std::ptr::write_bytes(s.as_mut_ptr(), 0, 1);
+            s.assume_init()
+        }
+    }
+}
+unsafe extern "C" {
+    #[doc = " Read an entire row's cells in one call.\n\n This is the batched counterpart to ghostty_render_state_row_cells_get():\n it fills a caller-owned record per cell plus a shared text buffer, so a\n renderer pays one C API call per ROW instead of several per cell.\n\n The iterator position is neither read nor modified: the whole row is read\n regardless of where ghostty_render_state_row_cells_next() or\n ghostty_render_state_row_cells_select() left it.\n\n On GHOSTTY_OUT_OF_SPACE the required capacities are reported in\n entries_len, styles_len and text.len, and the contents of the caller's\n buffers are unspecified.\n\n        sizeof(GhosttyRenderStateRowCellsBatch), returns\n        GHOSTTY_INVALID_VALUE)\n         buffer is too small\n"]
+    pub fn ghostty_render_state_row_cells_get_all(
+        cells: RenderStateRowCells,
+        batch: *mut RenderStateRowCellsBatch,
+    ) -> Result::Type;
+}
 unsafe extern "C" {
     #[doc = " Free a row cells instance.\n\n"]
     pub fn ghostty_render_state_row_cells_free(cells: RenderStateRowCells);

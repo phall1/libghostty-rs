@@ -6,7 +6,7 @@ use crate::{
     alloc::{Allocator, Object},
     error::{Error, Result, from_optional_result, from_result},
     ffi,
-    screen::{Cell, Row},
+    screen::{Cell, CellWide, Row},
     style::{RgbColor, Style},
     terminal::Terminal,
 };
@@ -919,6 +919,251 @@ impl CellIteration<'_, '_> {
     pub fn has_styling(&self) -> Result<bool> {
         self.get(ffi::RenderStateRowCellsData::HAS_STYLING)
     }
+
+    /// Read the WHOLE row in a single crossing into libghostty.
+    ///
+    /// The per-cell accessors on this type each cost a call into the C API,
+    /// so a renderer that wants a cluster, a style and both resolved colors
+    /// pays four or five crossings for every cell on the screen. This reads
+    /// all of it at once into `buf`: a compact record per cell, the row's
+    /// styles deduplicated into runs, and every cluster's UTF-8 bytes back
+    /// to back.
+    ///
+    /// The iteration position is neither read nor moved, so this can be
+    /// called on a fresh [`CellIterator::update`] without a preceding
+    /// [`next`][CellIteration::next].
+    ///
+    /// `buf` is caller-owned and reusable: it grows to fit the widest row it
+    /// has seen and then never allocates again, which is what makes this
+    /// allocation-free in steady state.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use libghostty_vt::{RenderState, Terminal, TerminalOptions};
+    /// use libghostty_vt::render::{CellIterator, RowBuf, RowIterator};
+    ///
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// let mut terminal = Terminal::new(TerminalOptions {
+    ///     cols: 20,
+    ///     rows: 2,
+    ///     max_scrollback: 0,
+    /// })?;
+    /// terminal.vt_write(b"\x1b[1;31mhi\x1b[0m");
+    ///
+    /// let mut state = RenderState::new()?;
+    /// let snapshot = state.update(&terminal)?;
+    /// let mut rows = RowIterator::new()?;
+    /// let mut cells = CellIterator::new()?;
+    /// let mut buf = RowBuf::default();
+    ///
+    /// let mut iteration = rows.update(&snapshot)?;
+    /// let row = iteration.next().ok_or("no rows")?;
+    /// let read = cells.update(row)?.read_row(&mut buf)?;
+    ///
+    /// assert_eq!(read.len(), 20);
+    /// assert_eq!(read.get(0).map(|c| c.text), Some("h"));
+    /// assert!(read.get(0).is_some_and(|c| c.has_styling));
+    /// assert!(read.style(read.get(0).unwrap().style_index)?.bold);
+    /// # Ok(())}
+    /// ```
+    pub fn read_row<'buf>(&self, buf: &'buf mut RowBuf) -> Result<RowCells<'buf>> {
+        let (cells, styles, text) = self.fill_row(buf)?;
+        Ok(RowCells {
+            entries: &buf.entries[..cells],
+            styles: &buf.styles[..styles],
+            text: std::str::from_utf8(&buf.text[..text]).map_err(|_| Error::InvalidValue)?,
+        })
+    }
+
+    /// Fill `buf` from the current row, growing it as needed, and return the
+    /// `(cells, styles, text bytes)` the row actually wrote.
+    ///
+    /// At most two calls: the first reports exactly what the row needs, so a
+    /// buffer grown to that size always fits on the retry.
+    fn fill_row(&self, buf: &mut RowBuf) -> Result<(usize, usize, usize)> {
+        for _ in 0..2 {
+            let mut batch = ffi::sized!(ffi::RenderStateRowCellsBatch);
+            batch.entries = buf.entries.as_mut_ptr();
+            batch.entries_cap = buf.entries.len();
+            batch.styles = buf.styles.as_mut_ptr();
+            batch.styles_cap = buf.styles.len();
+            batch.text = ffi::Buffer {
+                ptr: buf.text.as_mut_ptr(),
+                cap: buf.text.len(),
+                len: 0,
+            };
+
+            // SAFETY: every pointer handed over addresses `buf`'s own
+            // allocation and is paired with that allocation's length, and the
+            // C side only ever writes within the capacity it is given (it
+            // reports what it needs instead). `batch` outlives the call.
+            let result = unsafe {
+                ffi::ghostty_render_state_row_cells_get_all(self.iter.0.as_raw(), &raw mut batch)
+            };
+            match result {
+                ffi::Result::SUCCESS => {
+                    return Ok((batch.entries_len, batch.styles_len, batch.text.len));
+                }
+                ffi::Result::OUT_OF_SPACE => {
+                    buf.entries
+                        .resize(batch.entries_len, ffi::RenderStateRowCellEntry::default());
+                    buf.styles.resize(batch.styles_len, ffi::Style::default());
+                    buf.text.resize(batch.text.len, 0);
+                }
+                ffi::Result::OUT_OF_MEMORY => return Err(Error::OutOfMemory),
+                _ => return Err(Error::InvalidValue),
+            }
+        }
+        Err(Error::OutOfMemory)
+    }
+}
+
+/// Reusable buffers for a batched row read ([`CellIteration::read_row`]).
+///
+/// Hold one per renderer and hand it to every row: it grows to the widest
+/// row it has seen and then stops allocating, so the read costs one crossing
+/// into libghostty and no heap traffic at all.
+#[derive(Clone, Default)]
+pub struct RowBuf {
+    /// One record per cell, in column order.
+    entries: Vec<ffi::RenderStateRowCellEntry>,
+    /// The row's styles, deduplicated into runs.
+    styles: Vec<ffi::Style>,
+    /// Every cell's cluster, UTF-8, back to back.
+    text: Vec<u8>,
+}
+
+impl std::fmt::Debug for RowBuf {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // `ffi::Style` is a plain C struct with no `Debug`, so report the
+        // buffer's shape rather than its contents.
+        f.debug_struct("RowBuf")
+            .field("entries", &self.entries.len())
+            .field("styles", &self.styles.len())
+            .field("text", &self.text.len())
+            .finish()
+    }
+}
+
+impl RowBuf {
+    /// A buffer pre-grown for a row of `cols` cells.
+    ///
+    /// Purely an optimization: [`CellIteration::read_row`] grows a
+    /// [`Default`] buffer on its first call. Sizing it up front means the
+    /// very first row never pays a second crossing.
+    #[must_use]
+    pub fn with_cols(cols: usize) -> Self {
+        Self {
+            entries: vec![ffi::RenderStateRowCellEntry::default(); cols],
+            styles: vec![ffi::Style::default(); cols],
+            // One byte per column covers an all-ASCII row; anything wider
+            // grows on the first row that needs it.
+            text: vec![0; cols],
+        }
+    }
+}
+
+/// One row's cells, read in a single crossing into libghostty.
+///
+/// Produced by [`CellIteration::read_row`] and borrowed from the [`RowBuf`]
+/// that backs it, so the next read invalidates it.
+#[derive(Clone, Copy)]
+pub struct RowCells<'buf> {
+    entries: &'buf [ffi::RenderStateRowCellEntry],
+    styles: &'buf [ffi::Style],
+    text: &'buf str,
+}
+
+impl std::fmt::Debug for RowCells<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // `ffi::Style` is a plain C struct with no `Debug`, so report the
+        // style COUNT and leave resolving them to [`RowCells::style`].
+        f.debug_struct("RowCells")
+            .field("cells", &self.entries.len())
+            .field("styles", &self.styles.len())
+            .field("text", &self.text)
+            .finish()
+    }
+}
+
+impl<'buf> RowCells<'buf> {
+    /// The number of cells in the row.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    /// Whether the row has no cells at all.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+
+    /// The cell at column `x`, or `None` past the end of the row.
+    #[must_use]
+    pub fn get(&self, x: usize) -> Option<RowCell<'buf>> {
+        let entry = self.entries.get(x)?;
+        let start = entry.text_offset as usize;
+        let end = start.checked_add(entry.text_len as usize)?;
+        Some(RowCell {
+            text: self.text.get(start..end)?,
+            style_index: entry.style_index,
+            fg: entry.has_fg.then(|| entry.fg.into()),
+            bg: entry.has_bg.then(|| entry.bg.into()),
+            has_styling: entry.has_styling,
+            selected: entry.selected,
+            wide: CellWide::try_from(u32::from(entry.wide)).unwrap_or(CellWide::Narrow),
+        })
+    }
+
+    /// Every cell in the row, in column order.
+    pub fn iter(&self) -> impl Iterator<Item = RowCell<'buf>> + use<'buf> {
+        let row = *self;
+        (0..row.entries.len()).filter_map(move |x| row.get(x))
+    }
+
+    /// The style behind a cell's [`style_index`][RowCell::style_index].
+    ///
+    /// Cells sharing a style share an index, so a renderer that coalesces
+    /// style runs calls this once per run rather than once per cell.
+    pub fn style(&self, index: u32) -> Result<Style> {
+        let raw = self
+            .styles
+            .get(index as usize)
+            .copied()
+            .ok_or(Error::InvalidValue)?;
+        Style::try_from(raw)
+    }
+
+    /// The number of distinct styles the row resolved to.
+    #[must_use]
+    pub fn styles_len(&self) -> usize {
+        self.styles.len()
+    }
+}
+
+/// One cell out of a batched row read ([`CellIteration::read_row`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RowCell<'buf> {
+    /// The cell's grapheme cluster as UTF-8. Empty when the cell has no text.
+    pub text: &'buf str,
+    /// Index of this cell's style within the row's style table; resolve it
+    /// with [`RowCells::style`]. Cells in the same style run share an index,
+    /// so comparing indices is enough to detect a style change.
+    pub style_index: u32,
+    /// The resolved foreground, or `None` when the cell has no explicit one
+    /// and the caller should use its own default.
+    pub fg: Option<RgbColor>,
+    /// The resolved background, or `None` when the cell has no explicit one
+    /// and the caller should use its own default.
+    pub bg: Option<RgbColor>,
+    /// Whether the cell carries a non-default style entry.
+    pub has_styling: bool,
+    /// Whether the cell falls inside the row's selection range.
+    pub selected: bool,
+    /// The cell's wide classification.
+    pub wide: CellWide,
 }
 
 //---------------------------
@@ -1003,5 +1248,151 @@ mod tests {
             .unwrap();
 
         assert!(state.update(&terminal).unwrap().dirty().is_ok());
+    }
+
+    /// The batched row read must agree, cell for cell, with the per-cell
+    /// accessors it replaces. If it ever drifts, a renderer that switched to
+    /// it would silently paint a different screen.
+    #[test]
+    fn read_row_agrees_with_the_per_cell_reads() {
+        let mut terminal = Terminal::new(Options {
+            cols: 12,
+            rows: 2,
+            max_scrollback: 0,
+        })
+        .unwrap();
+        // A styled run, a default run, a wide glyph (so a spacer tail is
+        // covered), a combining cluster, and a background-only cell.
+        terminal.vt_write("\x1b[1;31mAB\x1b[0m c\u{6771}e\u{301}\x1b[44m \x1b[0m".as_bytes());
+
+        let mut state = RenderState::new().unwrap();
+        let snapshot = state.update(&terminal).unwrap();
+        let mut rows = RowIterator::new().unwrap();
+        let mut cells = CellIterator::new().unwrap();
+        let mut buf = RowBuf::default();
+
+        let mut iteration = rows.update(&snapshot).unwrap();
+        let mut seen_rows = 0;
+        while let Some(row) = iteration.next() {
+            let batch = cells.update(row).unwrap().read_row(&mut buf).unwrap();
+            assert_eq!(batch.len(), 12);
+
+            let mut cluster = String::new();
+            let mut walk = cells.update(row).unwrap();
+            let mut x = 0;
+            while let Some(cell) = walk.next() {
+                let got = batch.get(x).expect("cell in range");
+
+                cluster.clear();
+                cell.graphemes_utf8(&mut cluster).unwrap();
+                assert_eq!(got.text, cluster, "row {seen_rows} col {x} cluster");
+                assert_eq!(
+                    got.fg,
+                    cell.fg_color().unwrap(),
+                    "row {seen_rows} col {x} fg"
+                );
+                assert_eq!(
+                    got.bg,
+                    cell.bg_color().unwrap(),
+                    "row {seen_rows} col {x} bg"
+                );
+                assert_eq!(
+                    got.has_styling,
+                    cell.has_styling().unwrap(),
+                    "row {seen_rows} col {x} styling"
+                );
+                assert_eq!(
+                    got.selected,
+                    cell.is_selected().unwrap(),
+                    "row {seen_rows} col {x} selected"
+                );
+                assert_eq!(
+                    got.wide,
+                    cell.raw_cell().unwrap().wide().unwrap(),
+                    "row {seen_rows} col {x} wide"
+                );
+                assert_eq!(
+                    batch.style(got.style_index).unwrap(),
+                    cell.style().unwrap(),
+                    "row {seen_rows} col {x} style"
+                );
+                x += 1;
+            }
+            assert_eq!(x, 12);
+            seen_rows += 1;
+        }
+        assert_eq!(seen_rows, 2);
+    }
+
+    /// Styles are deduplicated into runs, so a row of one style costs one
+    /// entry. That is what lets a renderer compare style INDICES per cell
+    /// and materialize a `Style` only when a run ends.
+    #[test]
+    fn read_row_dedupes_styles_into_runs() {
+        let mut terminal = Terminal::new(Options {
+            cols: 8,
+            rows: 1,
+            max_scrollback: 0,
+        })
+        .unwrap();
+        terminal.vt_write(b"\x1b[1mAAAA\x1b[0mBBBB");
+
+        let mut state = RenderState::new().unwrap();
+        let snapshot = state.update(&terminal).unwrap();
+        let mut rows = RowIterator::new().unwrap();
+        let mut cells = CellIterator::new().unwrap();
+        let mut buf = RowBuf::with_cols(8);
+
+        let mut iteration = rows.update(&snapshot).unwrap();
+        let row = iteration.next().unwrap();
+        let batch = cells.update(row).unwrap().read_row(&mut buf).unwrap();
+
+        assert_eq!(batch.styles_len(), 2, "one bold run plus one default run");
+        let bold = batch.get(0).unwrap().style_index;
+        let plain = batch.get(4).unwrap().style_index;
+        assert_ne!(bold, plain);
+        for x in 0..4 {
+            assert_eq!(batch.get(x).unwrap().style_index, bold);
+        }
+        for x in 4..8 {
+            assert_eq!(batch.get(x).unwrap().style_index, plain);
+        }
+        assert!(batch.style(bold).unwrap().bold);
+        assert!(!batch.style(plain).unwrap().bold);
+        assert!(matches!(batch.style(u32::MAX), Err(Error::InvalidValue)));
+    }
+
+    /// A `Default` buffer starts empty, so the very first read has to grow it
+    /// and retry. Reusing the same buffer afterwards must not reallocate.
+    #[test]
+    fn read_row_grows_an_empty_buffer_then_reuses_it() {
+        let mut terminal = Terminal::new(Options {
+            cols: 20,
+            rows: 1,
+            max_scrollback: 0,
+        })
+        .unwrap();
+        terminal.vt_write("\u{1f980} wide and narrow".as_bytes());
+
+        let mut state = RenderState::new().unwrap();
+        let snapshot = state.update(&terminal).unwrap();
+        let mut rows = RowIterator::new().unwrap();
+        let mut cells = CellIterator::new().unwrap();
+        let mut buf = RowBuf::default();
+
+        let text: String = {
+            let mut iteration = rows.update(&snapshot).unwrap();
+            let row = iteration.next().unwrap();
+            let batch = cells.update(row).unwrap().read_row(&mut buf).unwrap();
+            batch.iter().map(|c| c.text).collect()
+        };
+        assert_eq!(text, "\u{1f980} wide and narrow");
+
+        // Second read over the now-warm buffer: same answer, no growth.
+        let mut iteration = rows.update(&snapshot).unwrap();
+        let row = iteration.next().unwrap();
+        let batch = cells.update(row).unwrap().read_row(&mut buf).unwrap();
+        assert_eq!(batch.iter().map(|c| c.text).collect::<String>(), text);
+        assert_eq!(batch.get(20), None, "past the end of the row");
     }
 }
