@@ -359,6 +359,18 @@ impl<'alloc: 'cb, 'cb> Terminal<'alloc, 'cb> {
         unsafe { ffi::ghostty_terminal_reset(self.inner.as_raw()) }
     }
 
+    /// Clear the active screen and history without feeding or resetting the VT
+    /// parser, preserving pending CSI/OSC/DCS/UTF-8 continuation and ownership.
+    ///
+    /// Applies CUP 1;1, ED 2, and ED 3 semantics (including existing origin,
+    /// margins, and protection), clears selection, and follows the live bottom.
+    /// Modes, rendition, title, and dimensions are preserved. No PTY writes or
+    /// stream effects are emitted. Borrowed grid references are invalidated.
+    pub fn clear_presentation(&mut self) {
+        // SAFETY: this wrapper exclusively owns a live terminal handle.
+        unsafe { ffi::ghostty_terminal_clear_presentation(self.inner.as_raw()) }
+    }
+
     /// Scroll the terminal viewport.
     pub fn scroll_viewport(&mut self, scroll: ScrollViewport) {
         unsafe { ffi::ghostty_terminal_scroll_viewport(self.inner.as_raw(), scroll.into()) }
@@ -1758,6 +1770,31 @@ mod tests {
     use crate::render::CursorVisualStyle;
     use std::cell::{Cell, RefCell};
     use std::mem::ManuallyDrop;
+
+    #[test]
+    fn clear_presentation_preserves_pending_dcs_without_emitting_effects() {
+        let responses = RefCell::new(Vec::<Vec<u8>>::new());
+        let mut terminal = Terminal::new(Options {
+            cols: 20,
+            rows: 2,
+            max_scrollback: 100,
+        })
+        .unwrap();
+        terminal
+            .on_pty_write(|_, bytes: &[u8]| {
+                responses.borrow_mut().push(bytes.to_vec());
+            })
+            .unwrap();
+        terminal.vt_write(b"old\r\nhistory\r\nvisible\x1b[1m\x1bP$q");
+        assert!(terminal.scrollback_rows().unwrap() > 0);
+
+        terminal.clear_presentation();
+
+        assert!(responses.borrow().is_empty());
+        assert_eq!(terminal.scrollback_rows().unwrap(), 0);
+        terminal.vt_write(b"m\x1b\\");
+        assert_eq!(*responses.borrow(), vec![b"\x1bP1$r0;1m\x1b\\".to_vec()]);
+    }
 
     #[inline(never)]
     fn build_terminal<'cb>(callback_count: &'cb RefCell<usize>) -> Terminal<'static, 'cb> {

@@ -1133,6 +1133,13 @@ impl<'alloc: 'cb, 'cb> DecodedStream<'alloc, 'cb> {
         self.terminal.scroll_viewport(scroll);
     }
 
+    /// Clear the live presentation and preserve parser continuation without
+    /// exposing or replacing the terminal retained by the history decoder.
+    /// Callers cancelling progressive history must stop submitting its pages.
+    pub fn clear_presentation(&mut self) {
+        self.terminal.clear_presentation();
+    }
+
     /// Resize the decoded terminal. Any later snapshot history pages are
     /// reported with `retained == false`; authenticated decoding still reaches
     /// FINISH without replacing the resized active state.
