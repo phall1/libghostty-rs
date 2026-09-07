@@ -2010,7 +2010,15 @@ mod tests {
     #[test]
     fn scrollback_line_limit_forwards_and_prunes() {
         fn populated_total(max_lines: Option<usize>) -> u64 {
-            let mut terminal = tiny_terminal();
+            // The limit is page-granular with a one-page minimum. At eight
+            // columns, 4000 blank lines still fit below the pruning threshold.
+            // Use a normal width so this fixture exercises whole-page pruning.
+            let mut terminal = Terminal::new(Options {
+                cols: 80,
+                rows: 3,
+                max_scrollback: 100,
+            })
+            .expect("terminal should initialize");
             terminal
                 .set_scrollback_max_bytes(None)
                 .expect("remove byte cap");
