@@ -375,7 +375,6 @@ impl ContinuationOptions {
     }
 }
 
-
 /// Metadata for one complete opaque capture record.
 #[derive(Debug)]
 pub enum CaptureEventKind {
@@ -464,7 +463,6 @@ fn capture_event<'buffer>(
     })
 }
 
-
 /// RAII incremental capture borrowing its terminal against mutation.
 #[derive(Debug)]
 pub struct Capture<'terminal, 'alloc> {
@@ -529,7 +527,6 @@ impl<'terminal, 'alloc> Capture<'terminal, 'alloc> {
             _not_send_or_sync: PhantomData,
         })
     }
-
 
     /// Abort capture and release its terminal borrow.
     pub fn abort(mut self) -> Result<()> {
@@ -613,7 +610,6 @@ impl Drop for CaptureContinuation<'_> {
         unsafe { ffi::ghostty_terminal_snapshot_continuation_free(self.inner.as_raw()) };
     }
 }
-
 
 impl<'terminal_alloc: 'cb, 'cb> Terminal<'terminal_alloc, 'cb> {
     /// Begin bounded incremental capture using Ghostty's default allocator.
@@ -1125,6 +1121,15 @@ impl<'alloc: 'cb, 'cb> DecodedStream<'alloc, 'cb> {
         callback: impl crate::terminal::PtyWriteFn<'alloc, 'cb>,
     ) -> crate::error::Result<&mut Self> {
         self.terminal.on_pty_write(callback)?;
+        Ok(self)
+    }
+
+    /// Register live bell delivery while retaining decoded terminal ownership.
+    pub fn on_bell(
+        &mut self,
+        callback: impl crate::terminal::BellFn<'alloc, 'cb>,
+    ) -> crate::error::Result<&mut Self> {
+        self.terminal.on_bell(callback)?;
         Ok(self)
     }
 
@@ -2600,20 +2605,14 @@ mod tests {
             }
         }
 
-        let CaptureDetachFailure {
-            error,
-            capture,
-        } = capture
+        let CaptureDetachFailure { error, capture } = capture
             .detach_ready(DetachOptions {
                 max_total_bytes: 1,
                 ..DetachOptions::default()
             })
             .expect_err("retained-byte limit must be transactional");
         assert_eq!(error, Error::LimitExceeded);
-        let CaptureDetachFailure {
-            error,
-            capture,
-        } = capture
+        let CaptureDetachFailure { error, capture } = capture
             .detach_ready(DetachOptions {
                 max_pages: 4096,
                 max_total_bytes: 64 * 1024 * 1024,
@@ -2630,17 +2629,16 @@ mod tests {
             .expect("READY detachment");
 
         source.vt_write(b"live-after-ready");
-        source.resize(81, 5, 0, 0).expect("source resize after detach");
+        source
+            .resize(81, 5, 0, 0)
+            .expect("source resize after detach");
         drop(source);
 
         let mut saw_row_gate = false;
         let mut history_rows = 0;
         loop {
             let mut record = vec![0; capture_options.max_record_bytes];
-            let event = match continuation.next(
-                ContinuationOptions { max_rows: 1 },
-                &mut record,
-            ) {
+            let event = match continuation.next(ContinuationOptions { max_rows: 1 }, &mut record) {
                 Ok(event) => event,
                 Err(Error::OutOfSpace {
                     required_bytes,
@@ -2680,14 +2678,16 @@ mod tests {
             }
         }
         assert!(saw_row_gate);
-        assert!(history_rows > 500, "many small-byte blank rows were charged");
+        assert!(
+            history_rows > 500,
+            "many small-byte blank rows were charged"
+        );
 
         let decoded = Terminal::decode_snapshot(&snapshot_bytes)
             .expect("detached snapshot decode")
             .terminal;
         assert_semantically_equal(&control, &decoded);
     }
-
 
     enum DriveState {
         Before(Decoder<'static>),
@@ -2958,6 +2958,22 @@ mod tests {
         assert_eq!(consumed, bytes.len());
         assert!(history_pages > 1);
         assert_semantically_equal(&source, &decoded);
+    }
+
+    #[test]
+    fn decoded_stream_delivers_live_bells_without_treating_osc_terminators_as_bells() {
+        let mut source = multipage_terminal();
+        let bytes = capture_all(&mut source);
+        let (mut stream, _) = stream_after_history_page(&bytes);
+        let bells = Rc::new(RefCell::new(0));
+        let observed = Rc::clone(&bells);
+        stream
+            .on_bell(move |_terminal| *observed.borrow_mut() += 1)
+            .expect("decoded bell callback");
+        stream.vt_write(b"\x1b]2;title\x07");
+        assert_eq!(*bells.borrow(), 0);
+        stream.vt_write(b"\x07");
+        assert_eq!(*bells.borrow(), 1);
     }
 
     #[test]
