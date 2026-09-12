@@ -340,6 +340,18 @@ impl<'alloc: 'cb, 'cb> Terminal<'alloc, 'cb> {
         unsafe { ffi::ghostty_terminal_reset(self.inner.as_raw()) }
     }
 
+    /// Clear the active screen and history without feeding or resetting the VT
+    /// parser, preserving pending CSI/OSC/DCS/UTF-8 continuation and ownership.
+    ///
+    /// Applies CUP 1;1, ED 2, and ED 3 semantics (including existing origin,
+    /// margins, and protection), clears selection, and follows the live bottom.
+    /// Modes, rendition, title, and dimensions are preserved. No PTY writes or
+    /// stream effects are emitted. Borrowed grid references are invalidated.
+    pub fn clear_presentation(&mut self) {
+        // SAFETY: this wrapper exclusively owns a live terminal handle.
+        unsafe { ffi::ghostty_terminal_clear_presentation(self.inner.as_raw()) }
+    }
+
     /// Scroll the terminal viewport.
     pub fn scroll_viewport(&mut self, scroll: ScrollViewport) {
         unsafe { ffi::ghostty_terminal_scroll_viewport(self.inner.as_raw(), scroll.into()) }
@@ -2099,8 +2111,64 @@ mod tests {
     use super::*;
     use crate::RenderState;
     use crate::render::CursorVisualStyle;
+    use crate::snapshot::Decoder;
+    use crate::style::{PaletteIndex, StyleColor};
     use std::cell::{Cell, RefCell};
     use std::mem::ManuallyDrop;
+
+    #[test]
+    fn clear_presentation_preserves_pending_dcs_without_emitting_effects() {
+        let responses = RefCell::new(Vec::<Vec<u8>>::new());
+        let mut terminal = Terminal::new(20, 2).unwrap();
+        terminal
+            .set_scrollback_max_lines(Some(100))
+            .expect("scrollback");
+        terminal
+            .on_pty_write(|_, bytes: &[u8]| {
+                responses.borrow_mut().push(bytes.to_vec());
+            })
+            .unwrap();
+        terminal.vt_write(b"old\r\nhistory\r\nvisible\x1b[1m\x1bP$q");
+        assert!(terminal.scrollback_rows().unwrap() > 0);
+
+        terminal.clear_presentation();
+
+        assert!(responses.borrow().is_empty());
+        assert_eq!(terminal.scrollback_rows().unwrap(), 0);
+        terminal.vt_write(b"m\x1b\\");
+        assert_eq!(*responses.borrow(), vec![b"\x1bP1$r0;1m\x1b\\".to_vec()]);
+    }
+
+    #[test]
+    fn clear_presentation_preserves_parser_after_snapshot_decode() {
+        let mut source = Terminal::new(40, 12).unwrap();
+        source
+            .set_continuation_max_bytes(64 * 1024)
+            .expect("continuation tracking");
+        source.vt_write(b"hello");
+        source.vt_write(b"\x1b[3");
+        let mut encoded = Vec::new();
+        source.encode_snapshot(&mut encoded).expect("encode");
+
+        let decoder = Decoder::new_buf(&encoded).expect("decoder");
+        let mut inc = decoder.ready().expect("ready");
+        while inc.next().ok().flatten().is_some() {}
+        let mut terminal = inc.into_terminal();
+        // Decoded terminals have continuation tracking disabled, so the
+        // continuation bytes cannot be extracted and replayed after RIS.
+        // clear_presentation must wipe the grid without touching the parser.
+        terminal.clear_presentation();
+        assert_eq!(terminal.scrollback_rows().unwrap(), 0);
+        terminal.vt_write(b"1mX");
+        let cell = terminal
+            .grid_ref(Point::Active(PointCoordinate { x: 0, y: 0 }))
+            .expect("cell");
+        assert_eq!(cell.cell().unwrap().codepoint().unwrap(), u32::from(b'X'));
+        assert_eq!(
+            cell.style().unwrap().fg_color,
+            StyleColor::Palette(PaletteIndex(1))
+        );
+    }
 
     #[inline(never)]
     fn build_terminal<'cb>(callback_count: &'cb RefCell<usize>) -> Terminal<'static, 'cb> {

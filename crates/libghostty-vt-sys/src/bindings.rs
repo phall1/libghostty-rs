@@ -2678,6 +2678,10 @@ unsafe extern "C" {
     pub fn ghostty_terminal_reset(terminal: Terminal);
 }
 unsafe extern "C" {
+    #[doc = " Clear the active presentation without consuming or resetting the VT parser.\n\n Performs the terminal operations of CUP 1;1, ED 2, and ED 3 directly, then\n clears selection and follows the bottom viewport. Existing origin/margin\n and erase-protection semantics apply, just as for those control sequences.\n Preserves pending VT/UTF-8 continuation, modes, rendition, title, dimensions,\n and terminal ownership. Does not emit PTY writes or other stream effects.\n Borrowed grid references are invalidated as with any terminal mutation.\n NULL is a no-op.\n"]
+    pub fn ghostty_terminal_clear_presentation(terminal: Terminal);
+}
+unsafe extern "C" {
     #[doc = " Resize the terminal to the given dimensions.\n\n Changes the number of columns and rows in the terminal. The primary\n screen will reflow content if wraparound mode is enabled; the alternate\n screen does not reflow. If the dimensions are unchanged, this is a no-op.\n\n This also updates the terminal's pixel dimensions (used for image\n protocols and size reports), disables synchronized output mode (allowed\n by the spec so that resize results are shown immediately), and sends an\n in-band size report if mode 2048 is enabled.\n\n"]
     pub fn ghostty_terminal_resize(
         terminal: Terminal,
