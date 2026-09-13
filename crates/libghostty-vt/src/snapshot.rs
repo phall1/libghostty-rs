@@ -598,7 +598,7 @@ const RECORD_TAG_PAGE: u16 = 3;
 const RECORD_TAG_HISTORY: u16 = 4;
 const RECORD_TAG_FINISH: u16 = 6;
 
-fn staged_record(bytes: &[u8], offset: usize) -> Result<(u16, usize)> {
+fn staged_record(bytes: &[u8], offset: usize) -> Result<(u16, usize, usize)> {
     let header_end = offset
         .checked_add(RECORD_HEADER_BYTES)
         .ok_or(Error::InvalidValue)?;
@@ -609,21 +609,34 @@ fn staged_record(bytes: &[u8], offset: usize) -> Result<(u16, usize)> {
         .checked_add(payload_len)
         .filter(|end| *end <= bytes.len())
         .ok_or(Error::InvalidValue)?;
-    Ok((tag, end))
+    Ok((tag, header_end, end))
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum StagedHistoryKind {
+    Page { rows: usize },
+    Finish,
 }
 
 /// Validate the complete framing boundary before native can mutate a terminal.
-fn validate_staged_history_unit(bytes: &[u8]) -> Result<()> {
+fn validate_staged_history_unit(bytes: &[u8]) -> Result<StagedHistoryKind> {
     let mut offset = 0;
     let mut histories = 0;
     loop {
-        let (tag, end) = staged_record(bytes, offset)?;
+        let (tag, payload, end) = staged_record(bytes, offset)?;
         match tag {
             RECORD_TAG_HISTORY if histories < 2 => {
                 histories += 1;
                 offset = end;
             }
-            RECORD_TAG_PAGE | RECORD_TAG_FINISH if end == bytes.len() => return Ok(()),
+            RECORD_TAG_PAGE if end == bytes.len() => {
+                let rows_end = payload.checked_add(4).ok_or(Error::InvalidValue)?;
+                let header = bytes.get(payload..rows_end).ok_or(Error::InvalidValue)?;
+                return Ok(StagedHistoryKind::Page {
+                    rows: u16::from_le_bytes([header[2], header[3]]) as usize,
+                });
+            }
+            RECORD_TAG_FINISH if end == bytes.len() => return Ok(StagedHistoryKind::Finish),
             _ => return Err(Error::InvalidValue),
         }
     }
@@ -877,26 +890,63 @@ impl<'alloc: 'cb, 'cb> FeedIncrementalDecoder<'alloc, 'cb> {
         reason = "decoding is fallible and mutates the separately accessible live terminal"
     )]
     pub fn next(&mut self) -> Result<Option<FeedProgress>> {
+        self.next_inner(None)
+    }
+
+    /// Decode one unit only when its authenticated outcome has `expected_rows`.
+    ///
+    /// PAGE dimensions and complete framing are checked before native applies
+    /// the page. FINISH requires zero expected rows. A mismatch releases the
+    /// staged allocation, poisons this decoder, and leaves the terminal intact.
+    pub fn next_checked(&mut self, expected_rows: usize) -> Result<Option<FeedProgress>> {
+        self.next_inner(Some(expected_rows))
+    }
+
+    fn next_inner(&mut self, expected_rows: Option<usize>) -> Result<Option<FeedProgress>> {
         if self.finished || self.core.failed {
             return Err(Error::InvalidValue);
         }
-        if validate_staged_history_unit(&self.core.source.bytes).is_err() {
-            self.core.source.finish_operation();
+        let kind = self.validate_staged(expected_rows)?;
+        let result = unsafe { ffi::ghostty_snapshot_decoder_next(self.core.inner.as_raw()) };
+        if result == ffi::Result::NO_VALUE {
+            return self.complete_finish(kind);
+        }
+        self.core.complete_operation(result)?;
+        let progress = self.progress()?;
+        if !matches!(kind, StagedHistoryKind::Page { rows } if rows == progress.rows) {
             self.core.failed = true;
             return Err(Error::InvalidValue);
         }
-        let result = unsafe { ffi::ghostty_snapshot_decoder_next(self.core.inner.as_raw()) };
-        if result == ffi::Result::NO_VALUE {
-            let consumed_all = self.core.source.finish_operation();
-            if !consumed_all {
-                self.core.failed = true;
-                return Err(Error::InvalidValue);
-            }
-            self.finished = true;
-            return Ok(None);
+        Ok(Some(progress))
+    }
+
+    fn validate_staged(&mut self, expected_rows: Option<usize>) -> Result<StagedHistoryKind> {
+        let kind = match validate_staged_history_unit(&self.core.source.bytes) {
+            Ok(kind) => kind,
+            Err(_) => return self.reject_staged(),
+        };
+        let mismatched = expected_rows.is_some_and(|expected| match kind {
+            StagedHistoryKind::Page { rows } => rows != expected,
+            StagedHistoryKind::Finish => expected != 0,
+        });
+        if mismatched {
+            return self.reject_staged();
         }
-        self.core.complete_operation(result)?;
-        Ok(Some(FeedProgress {
+        Ok(kind)
+    }
+
+    fn complete_finish(&mut self, kind: StagedHistoryKind) -> Result<Option<FeedProgress>> {
+        let consumed_all = self.core.source.finish_operation();
+        if !consumed_all || kind != StagedHistoryKind::Finish {
+            self.core.failed = true;
+            return Err(Error::InvalidValue);
+        }
+        self.finished = true;
+        Ok(None)
+    }
+
+    fn progress(&self) -> Result<FeedProgress> {
+        Ok(FeedProgress {
             screen: self
                 .core
                 .get::<ffi::TerminalScreen::Type>(Data::PROGRESS_SCREEN)?
@@ -904,7 +954,14 @@ impl<'alloc: 'cb, 'cb> FeedIncrementalDecoder<'alloc, 'cb> {
                 .map_err(|_| Error::InvalidValue)?,
             rows: self.core.get(Data::PROGRESS_ROWS)?,
             remaining: self.core.get(Data::PROGRESS_REMAINING)?,
-        }))
+        })
+    }
+
+    fn reject_staged<T>(&mut self) -> Result<T> {
+        // Rejection occurs before native reads, so offset is necessarily zero.
+        let _ = self.core.source.finish_operation();
+        self.core.failed = true;
+        Err(Error::InvalidValue)
     }
 
     /// Borrow the renderable terminal while history is arriving.
@@ -1160,6 +1217,28 @@ mod tests {
     }
 
     #[test]
+    fn staged_decoder_rejects_row_mismatch_before_terminal_mutation() {
+        let mut terminal = source_terminal();
+        let captured = capture(&mut terminal, 1000, false).expect("capture");
+        let (unit, _, rows, _) = &captured.history[0];
+        let mut decoder = FeedDecoder::new(captured.bytes.len()).expect("decoder");
+        decoder.feed(&captured.ready).expect("READY");
+        let mut decoder = decoder.ready().expect("ready");
+        let rows_before = decoder.terminal().scrollback_rows().expect("rows");
+
+        decoder.feed(unit).expect("page");
+        assert!(matches!(
+            decoder.next_checked(rows + 1),
+            Err(Error::InvalidValue)
+        ));
+        assert_eq!(
+            decoder.terminal().scrollback_rows().expect("rows"),
+            rows_before
+        );
+        assert_eq!(decoder.staged_capacity_bytes(), 0);
+    }
+
+    #[test]
     fn zero_history_still_authenticates_finish() {
         let mut terminal = Terminal::new(80, 24).expect("terminal");
         let captured = capture(&mut terminal, 1000, false).expect("capture");
@@ -1171,7 +1250,12 @@ mod tests {
         decoder
             .feed(&captured.finish)
             .expect("history manifests and FINISH");
-        assert!(decoder.next().expect("authenticated FINISH").is_none());
+        assert!(
+            decoder
+                .next_checked(0)
+                .expect("authenticated FINISH")
+                .is_none()
+        );
     }
 
     #[test]
