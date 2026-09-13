@@ -1014,8 +1014,13 @@ mod tests {
         let mut capture = capture.detach()?;
         if write_after_ready {
             // This is the canonical source terminal, not the decoded replica.
-            // Crossing native page boundaries proves detach consumed the
-            // source borrow and ordinary append does not invalidate the cut.
+            // Unique OSC 8 values force active-page string/set capacity growth;
+            // replacing that active node must not invalidate the cold cut.
+            for id in 0..32 {
+                terminal
+                    .vt_write(format!("\x1b]8;;https://example.invalid/{id}\x1b\\x").as_bytes());
+            }
+            // Crossing native page boundaries also exercises ordinary append.
             for _ in 0..500 {
                 terminal.vt_write(b"\rSOURCE-LIVE\r\n");
             }
