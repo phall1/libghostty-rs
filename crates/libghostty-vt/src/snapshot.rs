@@ -444,7 +444,7 @@ fn capture_event(raw: ffi::SnapshotCaptureEvent) -> Result<CaptureEvent> {
 #[derive(Debug)]
 pub struct Capture<'alloc, 'cb, 'terminal> {
     core: CaptureCore<'alloc>,
-    terminal: &'terminal mut Terminal<'alloc, 'cb>,
+    _terminal: &'terminal mut Terminal<'alloc, 'cb>,
 }
 
 impl<'alloc: 'cb, 'cb, 'terminal> Capture<'alloc, 'cb, 'terminal> {
@@ -483,7 +483,7 @@ impl<'alloc: 'cb, 'cb, 'terminal> Capture<'alloc, 'cb, 'terminal> {
                 writer,
                 max_record_bytes: options.max_record_bytes,
             },
-            terminal,
+            _terminal: terminal,
         })
     }
 
@@ -501,45 +501,37 @@ impl<'alloc: 'cb, 'cb, 'terminal> Capture<'alloc, 'cb, 'terminal> {
     /// Detach the O(1)-storage history cut and release the source borrow.
     ///
     /// This is valid only immediately after [`CaptureEvent::Ready`].
-    pub fn detach(self) -> Result<HistoryCapture<'alloc, 'cb, 'terminal>> {
+    pub fn detach(self) -> Result<HistoryCapture<'alloc>> {
         let result = unsafe { ffi::ghostty_snapshot_capture_detach(self.core.inner.as_raw()) };
         from_result(result)?;
-        Ok(HistoryCapture {
-            core: self.core,
-            terminal: self.terminal,
-        })
+        Ok(HistoryCapture { core: self.core })
     }
 }
 
-/// A detached point-in-time history cut with mutable source access.
+/// A detached point-in-time history cut that retains no source borrow.
 #[derive(Debug)]
-pub struct HistoryCapture<'alloc, 'cb, 'terminal> {
+pub struct HistoryCapture<'alloc> {
     core: CaptureCore<'alloc>,
-    terminal: &'terminal mut Terminal<'alloc, 'cb>,
 }
 
-impl<'alloc: 'cb, 'cb> HistoryCapture<'alloc, 'cb, '_> {
+impl<'alloc> HistoryCapture<'alloc> {
     /// Perform one bounded history scan or record step.
     ///
+    /// `source` must be the original terminal used to create the capture.
+    /// Supplying a replacement returns [`CaptureInvalidation::WrongTerminal`],
+    /// even if its native allocation reused the original address.
     /// [`CaptureEvent::Scan`] inspects one page and writes no bytes. An
     /// invalidation event is a typed tombstone and means this capture can never
-    /// produce FINISH.
-    pub fn next(&mut self, buf: &mut [u8]) -> Result<CaptureEvent> {
-        let source = self.terminal.inner.as_raw();
+    /// produce FINISH. Dropping a detached capture never accesses its source.
+    pub fn next(
+        &mut self,
+        source: &mut Terminal<'alloc, '_>,
+        buf: &mut [u8],
+    ) -> Result<CaptureEvent> {
+        let source = source.inner.as_raw();
         self.core.call(buf, |capture, event| unsafe {
             ffi::ghostty_snapshot_capture_next_history(capture, source, event)
         })
-    }
-
-    /// Borrow the canonical source terminal for rendering or inspection.
-    #[must_use]
-    pub const fn terminal(&self) -> &Terminal<'alloc, 'cb> {
-        self.terminal
-    }
-
-    /// Mutably borrow the canonical source for live PTY writes between steps.
-    pub fn terminal_mut(&mut self) -> &mut Terminal<'alloc, 'cb> {
-        self.terminal
     }
 }
 
@@ -871,9 +863,7 @@ mod tests {
         terminal
     }
 
-    fn detached_capture<'terminal>(
-        terminal: &'terminal mut Terminal<'static, 'static>,
-    ) -> HistoryCapture<'static, 'static, 'terminal> {
+    fn detached_capture(terminal: &mut Terminal<'static, 'static>) -> HistoryCapture<'static> {
         let mut capture = terminal
             .capture_snapshot(CaptureOptions {
                 max_record_bytes: MAX_RECORD_BYTES,
@@ -888,10 +878,13 @@ mod tests {
         }
     }
 
-    fn tombstone(capture: &mut HistoryCapture<'static, 'static, '_>) -> CaptureInvalidation {
+    fn tombstone(
+        capture: &mut HistoryCapture<'static>,
+        terminal: &mut Terminal<'static, 'static>,
+    ) -> CaptureInvalidation {
         let mut buf = vec![0; MAX_RECORD_BYTES];
         for _ in 0..10_000 {
-            match capture.next(&mut buf).expect("capture step") {
+            match capture.next(terminal, &mut buf).expect("capture step") {
                 CaptureEvent::Invalidated(reason) => return reason,
                 CaptureEvent::Scan => {}
                 event => panic!("expected invalidation, got {event:?}"),
@@ -932,11 +925,11 @@ mod tests {
             // Crossing native page boundaries proves detach consumed the
             // source borrow and ordinary append does not invalidate the cut.
             for _ in 0..500 {
-                capture.terminal_mut().vt_write(b"\rSOURCE-LIVE\r\n");
+                terminal.vt_write(b"\rSOURCE-LIVE\r\n");
             }
         }
         loop {
-            let event = capture.next(&mut buf)?;
+            let event = capture.next(terminal, &mut buf)?;
             let record = &buf[..event.written()];
             bytes.extend_from_slice(record);
             pending.extend_from_slice(record);
@@ -1066,7 +1059,7 @@ mod tests {
         let mut capture = capture.detach().expect("detach");
         let mut pages = 0;
         loop {
-            match capture.next(&mut buf) {
+            match capture.next(&mut terminal, &mut buf) {
                 Ok(CaptureEvent::HistoryPage { .. }) => pages += 1,
                 Err(Error::LimitExceeded) => break,
                 Ok(CaptureEvent::Finish { .. }) => panic!("history unexpectedly fit one page"),
@@ -1098,27 +1091,88 @@ mod tests {
     fn detached_capture_reports_resize_reset_and_eviction_tombstones() {
         let mut resized = source_terminal();
         let mut resized_capture = detached_capture(&mut resized);
-        resized_capture
-            .terminal_mut()
-            .resize(201, 3, 0, 0)
-            .expect("resize");
-        assert_eq!(tombstone(&mut resized_capture), CaptureInvalidation::Resize);
+        resized.resize(201, 3, 0, 0).expect("resize");
+        assert_eq!(
+            tombstone(&mut resized_capture, &mut resized),
+            CaptureInvalidation::Resize
+        );
 
         let mut reset = source_terminal();
         let mut reset_capture = detached_capture(&mut reset);
-        reset_capture.terminal_mut().reset();
-        assert_eq!(tombstone(&mut reset_capture), CaptureInvalidation::Reset);
+        reset.reset();
+        assert_eq!(
+            tombstone(&mut reset_capture, &mut reset),
+            CaptureInvalidation::Reset
+        );
 
         let mut evicted = source_terminal();
         let mut evicted_capture = detached_capture(&mut evicted);
-        evicted_capture
-            .terminal_mut()
+        evicted
             .set_scrollback_max_lines(Some(1))
             .expect("prune scrollback");
         assert_eq!(
-            tombstone(&mut evicted_capture),
+            tombstone(&mut evicted_capture, &mut evicted),
             CaptureInvalidation::Evicted
         );
+    }
+
+    #[test]
+    fn detached_captures_coexist_while_the_source_stays_live() {
+        let mut terminal = source_terminal();
+        let mut first = detached_capture(&mut terminal);
+        let mut second = detached_capture(&mut terminal);
+        let mut first_finished = false;
+        let mut second_finished = false;
+        let mut buf = vec![0; MAX_RECORD_BYTES];
+
+        for _ in 0..10_000 {
+            terminal.vt_write(b"\rCONCURRENT-LIVE\r\n");
+            if !first_finished {
+                match first.next(&mut terminal, &mut buf).expect("first step") {
+                    CaptureEvent::Finish { .. } => first_finished = true,
+                    CaptureEvent::Invalidated(reason) => {
+                        panic!("first cut unexpectedly invalidated: {reason:?}")
+                    }
+                    _ => {}
+                }
+            }
+            if !second_finished {
+                match second.next(&mut terminal, &mut buf).expect("second step") {
+                    CaptureEvent::Finish { .. } => second_finished = true,
+                    CaptureEvent::Invalidated(reason) => {
+                        panic!("second cut unexpectedly invalidated: {reason:?}")
+                    }
+                    _ => {}
+                }
+            }
+            if first_finished && second_finished {
+                return;
+            }
+        }
+        panic!("simultaneous captures did not finish")
+    }
+
+    #[test]
+    fn detached_capture_rejects_replacement_and_drops_after_source() {
+        let mut original = source_terminal();
+        let mut capture = detached_capture(&mut original);
+        drop(original);
+
+        let mut replacement = source_terminal();
+        let mut buf = vec![0; MAX_RECORD_BYTES];
+        assert_eq!(
+            capture
+                .next(&mut replacement, &mut buf)
+                .expect("identity check"),
+            CaptureEvent::Invalidated(CaptureInvalidation::WrongTerminal)
+        );
+        drop(replacement);
+        drop(capture);
+
+        let mut source = source_terminal();
+        let capture = detached_capture(&mut source);
+        drop(source);
+        drop(capture);
     }
 }
 

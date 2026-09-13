@@ -4474,7 +4474,7 @@ unsafe extern "C" {
     pub fn ghostty_snapshot_encode(terminal: Terminal, writer: Writer) -> Result::Type;
 }
 unsafe extern "C" {
-    #[doc = " Create a record-at-a-time capture using the current GHOSTSNP format.\n\n The writer and terminal must remain alive until the capture is freed. The\n terminal must remain immutable only through READY; after\n ghostty_snapshot_capture_detach succeeds it may be mutated between history\n calls but must not be destroyed or replaced. The capture allocates exactly\n `max_record_bytes - 10` bytes of reusable payload scratch and never stages a\n complete snapshot."]
+    #[doc = " Create a record-at-a-time capture using the current GHOSTSNP format.\n\n The writer and any custom allocator backing it or the terminal must remain\n alive until the capture is freed. The terminal must remain alive and\n immutable only through READY; after ghostty_snapshot_capture_detach succeeds\n it may be mutated between history calls or destroyed. Detached capture\n destruction never dereferences the source. The capture allocates exactly\n `max_record_bytes - 10` bytes of reusable payload scratch and never stages a\n complete snapshot."]
     pub fn ghostty_snapshot_capture_new(
         allocator: *const Allocator,
         terminal: Terminal,
@@ -4495,7 +4495,7 @@ unsafe extern "C" {
     pub fn ghostty_snapshot_capture_detach(capture: SnapshotCapture) -> Result::Type;
 }
 unsafe extern "C" {
-    #[doc = " Perform one bounded detached-history step against the original terminal.\n\n SCAN writes no bytes and inspects one cold page. RECORD, HISTORY_PAGE, and\n FINISH each write one complete GHOSTSNP v1 record. INVALIDATED writes no\n bytes and carries a typed tombstone; no FINISH can be produced afterward.\n The terminal is borrowed immutably only for this synchronous call and may be\n mutated between calls. It must be the original still-live terminal passed to\n ghostty_snapshot_capture_new."]
+    #[doc = " Perform one bounded detached-history step against the original terminal.\n\n SCAN writes no bytes and inspects one cold page. RECORD, HISTORY_PAGE, and\n FINISH each write one complete GHOSTSNP v1 record. INVALIDATED writes no\n bytes and carries a typed tombstone; no FINISH can be produced afterward.\n The terminal is borrowed immutably only for this synchronous call and may be\n mutated between calls. It must be the original still-live terminal passed to\n ghostty_snapshot_capture_new. Every terminal receives a non-address identity;\n a replacement terminal is reported as WRONG_TERMINAL even if its allocation\n reuses the original address."]
     pub fn ghostty_snapshot_capture_next_history(
         capture: SnapshotCapture,
         terminal: Terminal,
