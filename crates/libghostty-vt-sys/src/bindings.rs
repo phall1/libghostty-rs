@@ -2678,7 +2678,7 @@ unsafe extern "C" {
     pub fn ghostty_terminal_reset(terminal: Terminal);
 }
 unsafe extern "C" {
-    #[doc = " Clear the active presentation without consuming or resetting the VT parser.\n\n Performs the terminal operations of CUP 1;1, ED 2, and ED 3 directly, then\n clears selection and follows the bottom viewport. Existing origin/margin\n and erase-protection semantics apply, just as for those control sequences.\n Preserves pending VT/UTF-8 continuation, modes, rendition, title, dimensions,\n and terminal ownership. Does not emit PTY writes or other stream effects.\n Borrowed grid references are invalidated as with any terminal mutation.\n NULL is a no-op.\n"]
+    #[doc = " Clear the active presentation without consuming or resetting the VT parser.\n\n Performs the terminal operations of CUP 1;1, ED 2, and ED 3 directly, then\n clears selection and follows the bottom viewport. Existing origin/margin\n and erase-protection semantics apply, just as for those control sequences.\n Preserves pending VT/UTF-8 continuation, modes, rendition, title, dimensions,\n and terminal ownership. Does not emit PTY writes or other stream effects.\n Borrowed grid references are invalidated as with any terminal mutation.\n NULL is a no-op.\n\n"]
     pub fn ghostty_terminal_clear_presentation(terminal: Terminal);
 }
 unsafe extern "C" {
@@ -3873,7 +3873,7 @@ pub mod Key {
 unsafe extern "C" {
     #[doc = " Create a new key event instance.\n\n Creates a new key event with default values. The event must be freed using\n ghostty_key_event_free() when no longer needed.\n\n"]
     pub fn ghostty_key_event_new(allocator: *const Allocator, event: *mut KeyEvent)
-    -> Result::Type;
+        -> Result::Type;
 }
 unsafe extern "C" {
     #[doc = " Free a key event instance.\n\n Releases all resources associated with the key event. After this call,\n the event handle becomes invalid and must not be used.\n\n"]
@@ -4347,6 +4347,79 @@ unsafe extern "C" {
         out_written: *mut usize,
     ) -> Result::Type;
 }
+#[repr(C)]
+#[derive(Debug, Copy, Clone)]
+pub struct SnapshotCaptureImpl {
+    _unused: [u8; 0],
+}
+#[doc = " Opaque bounded progressive snapshot capture."]
+pub type SnapshotCapture = *mut SnapshotCaptureImpl;
+#[doc = " Limits fixed when a progressive capture is created."]
+#[repr(C)]
+#[derive(Debug, Default, Copy, Clone)]
+pub struct SnapshotCaptureOptions {
+    pub size: usize,
+    pub max_record_bytes: usize,
+    pub max_pages: usize,
+}
+#[allow(clippy::unnecessary_operation, clippy::identity_op)]
+const _: () = {
+    ["Size of SnapshotCaptureOptions"][::std::mem::size_of::<SnapshotCaptureOptions>() - 24usize];
+    ["Alignment of SnapshotCaptureOptions"]
+        [::std::mem::align_of::<SnapshotCaptureOptions>() - 8usize];
+    ["Offset of field: SnapshotCaptureOptions::size"]
+        [::std::mem::offset_of!(SnapshotCaptureOptions, size) - 0usize];
+    ["Offset of field: SnapshotCaptureOptions::max_record_bytes"]
+        [::std::mem::offset_of!(SnapshotCaptureOptions, max_record_bytes) - 8usize];
+    ["Offset of field: SnapshotCaptureOptions::max_pages"]
+        [::std::mem::offset_of!(SnapshotCaptureOptions, max_pages) - 16usize];
+};
+pub mod SnapshotCaptureEventKind {
+    #[doc = " Boundary emitted by one progressive capture step."]
+    pub type Type = ::std::os::raw::c_uint;
+    pub const RECORD: Type = 0;
+    pub const READY: Type = 1;
+    pub const HISTORY_PAGE: Type = 2;
+    pub const FINISH: Type = 3;
+    pub const MAX_VALUE: Type = 2147483647;
+}
+#[doc = " Metadata for bytes synchronously written by one capture step."]
+#[repr(C)]
+#[derive(Debug, Copy, Clone)]
+pub struct SnapshotCaptureEvent {
+    pub size: usize,
+    pub kind: SnapshotCaptureEventKind::Type,
+    pub screen: TerminalScreen::Type,
+    pub rows: usize,
+    pub remaining: u32,
+    pub written: usize,
+}
+#[allow(clippy::unnecessary_operation, clippy::identity_op)]
+const _: () = {
+    ["Size of SnapshotCaptureEvent"][::std::mem::size_of::<SnapshotCaptureEvent>() - 40usize];
+    ["Alignment of SnapshotCaptureEvent"][::std::mem::align_of::<SnapshotCaptureEvent>() - 8usize];
+    ["Offset of field: SnapshotCaptureEvent::size"]
+        [::std::mem::offset_of!(SnapshotCaptureEvent, size) - 0usize];
+    ["Offset of field: SnapshotCaptureEvent::kind"]
+        [::std::mem::offset_of!(SnapshotCaptureEvent, kind) - 8usize];
+    ["Offset of field: SnapshotCaptureEvent::screen"]
+        [::std::mem::offset_of!(SnapshotCaptureEvent, screen) - 12usize];
+    ["Offset of field: SnapshotCaptureEvent::rows"]
+        [::std::mem::offset_of!(SnapshotCaptureEvent, rows) - 16usize];
+    ["Offset of field: SnapshotCaptureEvent::remaining"]
+        [::std::mem::offset_of!(SnapshotCaptureEvent, remaining) - 24usize];
+    ["Offset of field: SnapshotCaptureEvent::written"]
+        [::std::mem::offset_of!(SnapshotCaptureEvent, written) - 32usize];
+};
+impl Default for SnapshotCaptureEvent {
+    fn default() -> Self {
+        let mut s = ::std::mem::MaybeUninit::<Self>::uninit();
+        unsafe {
+            ::std::ptr::write_bytes(s.as_mut_ptr(), 0, 1);
+            s.assume_init()
+        }
+    }
+}
 pub mod SnapshotDecoderOption {
     #[doc = " Configurable snapshot decoder options.\n\n Options may only be changed before decoding starts. Calling\n ghostty_snapshot_decoder_set() after ghostty_snapshot_decoder_ready() or\n ghostty_snapshot_decoder_decode() returns GHOSTTY_INVALID_VALUE."]
     pub type Type = ::std::os::raw::c_uint;
@@ -4380,6 +4453,27 @@ pub mod SnapshotDecoderData {
 unsafe extern "C" {
     #[doc = " Encode a complete terminal snapshot to a writer.\n\n The terminal's persistent VT stream supplies the continuation bytes needed\n to reconstruct unfinished parser state. The caller must prevent concurrent\n writes or other terminal mutation for the duration of this call. The writer\n callback must not call terminal APIs with the same terminal handle.\n A terminal can be encoded with tracking disabled when its VT parser and\n UTF-8 decoder are both at ground. If either is unfinished, tracking must\n have been enabled before the input that produced that state was written;\n otherwise this returns GHOSTTY_INVALID_VALUE.\n\n Encoding begins at the writer's current position. If an error occurs, the\n writer may contain a partial snapshot without a valid FINISH checkpoint.\n Calls to the writer are synchronous; this function does not flush or make\n the caller's destination durable.\n\n         output, GHOSTTY_LIMIT_EXCEEDED if output accounting overflows, or\n         another error code on failure\n"]
     pub fn ghostty_snapshot_encode(terminal: Terminal, writer: Writer) -> Result::Type;
+}
+unsafe extern "C" {
+    #[doc = " Create a record-at-a-time capture using the current GHOSTSNP format.\n\n The writer and terminal are borrowed until the capture is freed. Neither\n may be mutated or destroyed in that interval. The capture allocates exactly\n `max_record_bytes - 10` bytes of reusable payload scratch and never stages a\n complete snapshot."]
+    pub fn ghostty_snapshot_capture_new(
+        allocator: *const Allocator,
+        terminal: Terminal,
+        writer: Writer,
+        options: *const SnapshotCaptureOptions,
+        capture: *mut SnapshotCapture,
+    ) -> Result::Type;
+}
+unsafe extern "C" {
+    #[doc = " Emit one complete envelope or record synchronously through the writer."]
+    pub fn ghostty_snapshot_capture_next(
+        capture: SnapshotCapture,
+        event: *mut SnapshotCaptureEvent,
+    ) -> Result::Type;
+}
+unsafe extern "C" {
+    #[doc = " Free capture state; NULL is a no-op."]
+    pub fn ghostty_snapshot_capture_free(capture: SnapshotCapture);
 }
 unsafe extern "C" {
     #[doc = " Encode a complete terminal snapshot to a caller-provided buffer.\n\n Pass NULL for buf with buf_len zero to query the required size. If the\n buffer is too small, this returns GHOSTTY_OUT_OF_SPACE and stores the\n required capacity in out_written. A non-NULL undersized buffer may contain\n a partial snapshot prefix. On success, out_written receives the number of\n bytes encoded.\n\n A terminal can be encoded with tracking disabled when its VT parser and\n UTF-8 decoder are both at ground. If either is unfinished, tracking must\n have been enabled before the input that produced that state was written;\n otherwise this returns GHOSTTY_INVALID_VALUE.\n\n             GHOSTTY_OUT_OF_SPACE (must not be NULL)\n"]
