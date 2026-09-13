@@ -868,7 +868,14 @@ impl<'alloc> FeedDecoder<'alloc> {
 pub struct FeedProgress {
     /// Screen whose history received the page.
     pub screen: Screen,
-    /// Rows prepended to the live terminal, or zero if it could not be applied.
+    /// Rows authenticated from the staged PAGE header.
+    ///
+    /// This is the wire outcome callers should compare with protocol metadata.
+    /// It is independent of local history limits and remains nonzero when the
+    /// authenticated page is intentionally discarded by local projection.
+    pub authenticated_rows: usize,
+    /// Rows retained in the live terminal, or zero when local limits discard
+    /// the authenticated page.
     pub rows: usize,
     /// Pages remaining in this screen's HISTORY sequence.
     pub remaining: u32,
@@ -917,11 +924,14 @@ impl<'alloc: 'cb, 'cb> FeedIncrementalDecoder<'alloc, 'cb> {
         self.next_inner(None)
     }
 
-    /// Decode one unit only when its authenticated outcome has `expected_rows`.
+    /// Decode one unit only when its staged PAGE has `expected_rows`.
     ///
     /// PAGE dimensions and complete framing are checked before native applies
     /// the page. FINISH requires zero expected rows. A mismatch releases the
     /// staged allocation, poisons this decoder, and leaves the terminal intact.
+    /// Successful PAGE results report the same count in
+    /// [`FeedProgress::authenticated_rows`], while [`FeedProgress::rows`] may
+    /// be zero when local history limits decline to retain those rows.
     pub fn next_checked(&mut self, expected_rows: usize) -> Result<Option<FeedProgress>> {
         self.next_inner(Some(expected_rows))
     }
@@ -936,12 +946,11 @@ impl<'alloc: 'cb, 'cb> FeedIncrementalDecoder<'alloc, 'cb> {
             return self.complete_finish(kind);
         }
         self.core.complete_operation(result)?;
-        let progress = self.progress()?;
-        if !matches!(kind, StagedHistoryKind::Page { rows } if rows == progress.rows) {
+        let StagedHistoryKind::Page { rows } = kind else {
             self.core.failed = true;
             return Err(Error::InvalidValue);
-        }
-        Ok(Some(progress))
+        };
+        Ok(Some(self.progress(rows)?))
     }
 
     fn validate_staged(&mut self, expected_rows: Option<usize>) -> Result<StagedHistoryKind> {
@@ -969,13 +978,14 @@ impl<'alloc: 'cb, 'cb> FeedIncrementalDecoder<'alloc, 'cb> {
         Ok(None)
     }
 
-    fn progress(&self) -> Result<FeedProgress> {
+    fn progress(&self, authenticated_rows: usize) -> Result<FeedProgress> {
         Ok(FeedProgress {
             screen: self
                 .core
                 .get::<ffi::TerminalScreen::Type>(Data::PROGRESS_SCREEN)?
                 .try_into()
                 .map_err(|_| Error::InvalidValue)?,
+            authenticated_rows,
             rows: self.core.get(Data::PROGRESS_ROWS)?,
             remaining: self.core.get(Data::PROGRESS_REMAINING)?,
         })
@@ -1172,6 +1182,7 @@ mod tests {
             }
             let progress = decoder.next().expect("valid history").expect("page");
             assert_eq!(progress.screen, *screen);
+            assert_eq!(progress.authenticated_rows, *rows);
             assert_eq!(progress.rows, *rows);
             assert_eq!(progress.remaining, *remaining);
             assert_eq!(decoder.staged_bytes(), 0, "page storage is released");
@@ -1260,6 +1271,43 @@ mod tests {
             rows_before
         );
         assert_eq!(decoder.staged_capacity_bytes(), 0);
+    }
+
+    #[test]
+    fn staged_decoder_authenticates_pages_discarded_by_local_limits() {
+        let mut terminal = source_terminal();
+        let captured = capture(&mut terminal, 1000, false).expect("capture");
+        let mut decoder = FeedDecoder::new(captured.bytes.len()).expect("decoder");
+        decoder.feed(&captured.ready).expect("READY");
+        let mut decoder = decoder.ready().expect("ready");
+        decoder
+            .terminal_mut()
+            .set_scrollback_max_lines(Some(1))
+            .expect("local history limit");
+
+        let mut discarded = false;
+        for (unit, _, expected_rows, _) in &captured.history {
+            decoder.feed(unit).expect("valid page");
+            let progress = decoder
+                .next_checked(*expected_rows)
+                .expect("authenticated page")
+                .expect("page outcome");
+            assert_eq!(progress.authenticated_rows, *expected_rows);
+            assert!(progress.rows == 0 || progress.rows == *expected_rows);
+            discarded |= progress.rows == 0;
+        }
+        assert!(
+            discarded,
+            "the bounded projection must discard a large page"
+        );
+
+        decoder.feed(&captured.finish).expect("FINISH");
+        assert!(
+            decoder
+                .next_checked(0)
+                .expect("authenticated FINISH")
+                .is_none()
+        );
     }
 
     #[test]
