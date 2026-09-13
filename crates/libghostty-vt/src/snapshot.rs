@@ -209,7 +209,7 @@ impl<'alloc: 'cb, 'cb> Terminal<'alloc, 'cb> {
     pub fn into_snapshot_capture(
         self,
         options: CaptureOptions,
-    ) -> Result<OwnedCapture<'alloc, 'cb>> {
+    ) -> std::result::Result<OwnedCapture<'alloc, 'cb>, OwnedCaptureError<'alloc, 'cb>> {
         OwnedCapture::new(self, options)
     }
 }
@@ -217,7 +217,7 @@ impl<'alloc: 'cb, 'cb> Terminal<'alloc, 'cb> {
 /// Hard limits fixed for the lifetime of a progressive snapshot capture.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct CaptureOptions {
-    /// Maximum encoded size of any individual record.
+    /// Maximum encoded size of the envelope or any individual record.
     pub max_record_bytes: usize,
     /// Maximum number of history pages the capture may emit.
     pub max_pages: usize,
@@ -533,10 +533,24 @@ pub struct OwnedCapture<'alloc: 'cb, 'cb> {
     terminal: Terminal<'alloc, 'cb>,
 }
 
+/// A failed owned-prefix construction together with the original terminal.
+#[derive(Debug)]
+pub struct OwnedCaptureError<'alloc: 'cb, 'cb> {
+    /// Construction error returned by libghostty.
+    pub error: Error,
+    /// Unchanged canonical terminal recovered from the failed attempt.
+    pub terminal: Terminal<'alloc, 'cb>,
+}
+
 impl<'alloc: 'cb, 'cb> OwnedCapture<'alloc, 'cb> {
-    fn new(mut terminal: Terminal<'alloc, 'cb>, options: CaptureOptions) -> Result<Self> {
-        let core = CaptureCore::new(&mut terminal, options)?;
-        Ok(Self { core, terminal })
+    fn new(
+        mut terminal: Terminal<'alloc, 'cb>,
+        options: CaptureOptions,
+    ) -> std::result::Result<Self, OwnedCaptureError<'alloc, 'cb>> {
+        match CaptureCore::new(&mut terminal, options) {
+            Ok(core) => Ok(Self { core, terminal }),
+            Err(error) => Err(OwnedCaptureError { error, terminal }),
+        }
     }
 
     /// Emit one complete prefix envelope or record into `buf`.
@@ -547,10 +561,20 @@ impl<'alloc: 'cb, 'cb> OwnedCapture<'alloc, 'cb> {
     }
 
     /// At READY, release the terminal and its detached history cut.
-    pub fn detach(self) -> Result<(Terminal<'alloc, 'cb>, HistoryCapture<'alloc>)> {
+    pub fn detach(
+        self,
+    ) -> std::result::Result<
+        (Terminal<'alloc, 'cb>, HistoryCapture<'alloc>),
+        OwnedCaptureError<'alloc, 'cb>,
+    > {
         let result = unsafe { ffi::ghostty_snapshot_capture_detach(self.core.inner.as_raw()) };
-        from_result(result)?;
-        Ok((self.terminal, HistoryCapture { core: self.core }))
+        match from_result(result) {
+            Ok(()) => Ok((self.terminal, HistoryCapture { core: self.core })),
+            Err(error) => Err(OwnedCaptureError {
+                error,
+                terminal: self.terminal,
+            }),
+        }
     }
 
     /// Abort prefix capture and recover the unchanged source terminal.
@@ -1428,6 +1452,29 @@ mod tests {
             .expect("owned capture");
         let mut terminal = capture.into_terminal();
         terminal.vt_write(b"recovered");
+
+        let terminal = Terminal::new(80, 24).expect("terminal");
+        let failure = terminal
+            .into_snapshot_capture(CaptureOptions {
+                max_record_bytes: MAX_RECORD_BYTES,
+                max_pages: 0,
+            })
+            .expect_err("invalid options");
+        assert!(matches!(failure.error, Error::InvalidValue));
+        let mut terminal = failure.terminal;
+        terminal.vt_write(b"recovered after constructor failure");
+
+        let terminal = Terminal::new(80, 24).expect("terminal");
+        let capture = terminal
+            .into_snapshot_capture(CaptureOptions {
+                max_record_bytes: MAX_RECORD_BYTES,
+                max_pages: 1,
+            })
+            .expect("owned capture");
+        let failure = capture.detach().expect_err("detach before READY");
+        assert!(matches!(failure.error, Error::InvalidValue));
+        let mut terminal = failure.terminal;
+        terminal.vt_write(b"recovered after detach failure");
     }
 }
 

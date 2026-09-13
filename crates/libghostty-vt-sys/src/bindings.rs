@@ -4359,6 +4359,7 @@ pub type SnapshotCapture = *mut SnapshotCaptureImpl;
 #[derive(Debug, Default, Copy, Clone)]
 pub struct SnapshotCaptureOptions {
     pub size: usize,
+    #[doc = " Maximum encoded size of the envelope or any individual record."]
     pub max_record_bytes: usize,
     pub max_pages: usize,
 }
