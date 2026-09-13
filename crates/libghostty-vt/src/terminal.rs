@@ -2117,6 +2117,44 @@ mod tests {
     use std::mem::ManuallyDrop;
 
     #[test]
+    fn resize_desync_storm_preserves_terminal_storage() {
+        let mut terminal = Terminal::new(80, 24).expect("terminal");
+        terminal
+            .set_scrollback_max_lines(Some(100))
+            .expect("history limit");
+        for i in 0..50 {
+            terminal.vt_write(format!("row-{i}-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\r\n").as_bytes());
+        }
+
+        let storm = [
+            (0_u16, 0_u16),
+            (1, 1),
+            (1, 200),
+            (200, 1),
+            (0, 0),
+            (1000, 1000),
+            (1, 1),
+            (3, 3),
+            (2, 2),
+            (1, 1),
+            (100, 30),
+        ];
+        for (requested_cols, requested_rows) in storm {
+            for i in 0..8 {
+                terminal.vt_write(
+                    format!("interleave-{i}-bbbbbbbbbbbbbbbbbbbbbbbbbbbb\r\n").as_bytes(),
+                );
+            }
+            terminal
+                .resize(requested_cols.max(1), requested_rows.max(1), 0, 0)
+                .expect("resize");
+        }
+
+        assert_eq!(terminal.cols().expect("columns"), 100);
+        assert_eq!(terminal.rows().expect("rows"), 30);
+    }
+
+    #[test]
     fn clear_presentation_preserves_pending_dcs_without_emitting_effects() {
         let responses = RefCell::new(Vec::<Vec<u8>>::new());
         let mut terminal = Terminal::new(20, 2).unwrap();
