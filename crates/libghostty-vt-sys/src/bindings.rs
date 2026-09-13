@@ -3873,7 +3873,7 @@ pub mod Key {
 unsafe extern "C" {
     #[doc = " Create a new key event instance.\n\n Creates a new key event with default values. The event must be freed using\n ghostty_key_event_free() when no longer needed.\n\n"]
     pub fn ghostty_key_event_new(allocator: *const Allocator, event: *mut KeyEvent)
-        -> Result::Type;
+    -> Result::Type;
 }
 unsafe extern "C" {
     #[doc = " Free a key event instance.\n\n Releases all resources associated with the key event. After this call,\n the event handle becomes invalid and must not be used.\n\n"]
@@ -4381,6 +4381,22 @@ pub mod SnapshotCaptureEventKind {
     pub const READY: Type = 1;
     pub const HISTORY_PAGE: Type = 2;
     pub const FINISH: Type = 3;
+    #[doc = " One cold-page descriptor was scanned; no bytes were written."]
+    pub const SCAN: Type = 4;
+    #[doc = " The READY cut can no longer be read safely; no bytes were written."]
+    pub const INVALIDATED: Type = 5;
+    #[doc = " The READY cut can no longer be read safely; no bytes were written."]
+    pub const MAX_VALUE: Type = 2147483647;
+}
+pub mod SnapshotCaptureInvalidation {
+    #[doc = " Typed reason a detached READY history cut became unusable."]
+    pub type Type = ::std::os::raw::c_uint;
+    pub const NONE: Type = 0;
+    pub const WRONG_TERMINAL: Type = 1;
+    pub const RESET: Type = 2;
+    pub const RESIZE: Type = 3;
+    pub const MUTATION: Type = 4;
+    pub const EVICTED: Type = 5;
     pub const MAX_VALUE: Type = 2147483647;
 }
 #[doc = " Metadata for bytes synchronously written by one capture step."]
@@ -4393,10 +4409,11 @@ pub struct SnapshotCaptureEvent {
     pub rows: usize,
     pub remaining: u32,
     pub written: usize,
+    pub invalidation: SnapshotCaptureInvalidation::Type,
 }
 #[allow(clippy::unnecessary_operation, clippy::identity_op)]
 const _: () = {
-    ["Size of SnapshotCaptureEvent"][::std::mem::size_of::<SnapshotCaptureEvent>() - 40usize];
+    ["Size of SnapshotCaptureEvent"][::std::mem::size_of::<SnapshotCaptureEvent>() - 48usize];
     ["Alignment of SnapshotCaptureEvent"][::std::mem::align_of::<SnapshotCaptureEvent>() - 8usize];
     ["Offset of field: SnapshotCaptureEvent::size"]
         [::std::mem::offset_of!(SnapshotCaptureEvent, size) - 0usize];
@@ -4410,6 +4427,8 @@ const _: () = {
         [::std::mem::offset_of!(SnapshotCaptureEvent, remaining) - 24usize];
     ["Offset of field: SnapshotCaptureEvent::written"]
         [::std::mem::offset_of!(SnapshotCaptureEvent, written) - 32usize];
+    ["Offset of field: SnapshotCaptureEvent::invalidation"]
+        [::std::mem::offset_of!(SnapshotCaptureEvent, invalidation) - 40usize];
 };
 impl Default for SnapshotCaptureEvent {
     fn default() -> Self {
@@ -4455,7 +4474,7 @@ unsafe extern "C" {
     pub fn ghostty_snapshot_encode(terminal: Terminal, writer: Writer) -> Result::Type;
 }
 unsafe extern "C" {
-    #[doc = " Create a record-at-a-time capture using the current GHOSTSNP format.\n\n The writer and terminal are borrowed until the capture is freed. Neither\n may be mutated or destroyed in that interval. The capture allocates exactly\n `max_record_bytes - 10` bytes of reusable payload scratch and never stages a\n complete snapshot."]
+    #[doc = " Create a record-at-a-time capture using the current GHOSTSNP format.\n\n The writer and terminal must remain alive until the capture is freed. The\n terminal must remain immutable only through READY; after\n ghostty_snapshot_capture_detach succeeds it may be mutated between history\n calls but must not be destroyed or replaced. The capture allocates exactly\n `max_record_bytes - 10` bytes of reusable payload scratch and never stages a\n complete snapshot."]
     pub fn ghostty_snapshot_capture_new(
         allocator: *const Allocator,
         terminal: Terminal,
@@ -4465,9 +4484,21 @@ unsafe extern "C" {
     ) -> Result::Type;
 }
 unsafe extern "C" {
-    #[doc = " Emit one complete envelope or record synchronously through the writer."]
+    #[doc = " Emit one complete prefix envelope or record through READY."]
     pub fn ghostty_snapshot_capture_next(
         capture: SnapshotCapture,
+        event: *mut SnapshotCaptureEvent,
+    ) -> Result::Type;
+}
+unsafe extern "C" {
+    #[doc = " Detach the O(1) history cut after READY and release the terminal borrow."]
+    pub fn ghostty_snapshot_capture_detach(capture: SnapshotCapture) -> Result::Type;
+}
+unsafe extern "C" {
+    #[doc = " Perform one bounded detached-history step against the original terminal.\n\n SCAN writes no bytes and inspects one cold page. RECORD, HISTORY_PAGE, and\n FINISH each write one complete GHOSTSNP v1 record. INVALIDATED writes no\n bytes and carries a typed tombstone; no FINISH can be produced afterward.\n The terminal is borrowed immutably only for this synchronous call and may be\n mutated between calls. It must be the original still-live terminal passed to\n ghostty_snapshot_capture_new."]
+    pub fn ghostty_snapshot_capture_next_history(
+        capture: SnapshotCapture,
+        terminal: Terminal,
         event: *mut SnapshotCaptureEvent,
     ) -> Result::Type;
 }

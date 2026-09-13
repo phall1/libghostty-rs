@@ -191,12 +191,11 @@ impl Terminal<'_, '_> {
 impl<'alloc: 'cb, 'cb> Terminal<'alloc, 'cb> {
     /// Begin a bounded, record-at-a-time snapshot capture.
     ///
-    /// The terminal remains immutably borrowed until the returned capture is
-    /// dropped. `max_record_bytes` bounds both native scratch storage and the
-    /// minimum output buffer accepted by [`Capture::next`]. `max_pages` bounds
-    /// the number of HISTORY page records emitted after READY.
+    /// The returned type-state wrappers retain exclusive access to the source:
+    /// prefix capture freezes it through READY, while detached history capture
+    /// exposes mutable access for live writes between bounded steps.
     pub fn capture_snapshot<'terminal>(
-        &'terminal self,
+        &'terminal mut self,
         options: CaptureOptions,
     ) -> Result<Capture<'alloc, 'cb, 'terminal>> {
         Capture::new(self, options)
@@ -215,6 +214,8 @@ pub struct CaptureOptions {
 /// Boundary represented by a progressive capture event.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum CaptureEventKind {
+    /// One cold page was inspected; no bytes were emitted.
+    Scan,
     /// A format envelope or ordinary record.
     Record,
     /// The authenticated renderable checkpoint.
@@ -223,11 +224,30 @@ pub enum CaptureEventKind {
     HistoryPage,
     /// The authenticated final checkpoint.
     Finish,
+    /// The point-in-time history cut is no longer available.
+    Invalidated,
+}
+
+/// Typed reason a detached history cut can no longer be encoded safely.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum CaptureInvalidation {
+    /// A different source terminal was supplied.
+    WrongTerminal,
+    /// The source screen was reset.
+    Reset,
+    /// The source width changed and history was reflowed.
+    Resize,
+    /// A retained cold page changed identity or contents.
+    Mutation,
+    /// A retained cold page was removed by scrollback pruning.
+    Evicted,
 }
 
 /// Metadata for one complete envelope or record emitted by [`Capture::next`].
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum CaptureEvent {
+    /// One cold page descriptor was inspected without emitting bytes.
+    Scan,
     /// A format envelope or non-checkpoint record was emitted.
     Record {
         /// Bytes emitted for this envelope or record.
@@ -254,6 +274,8 @@ pub enum CaptureEvent {
         /// Bytes emitted for the FINISH record.
         written: usize,
     },
+    /// The detached cut was invalidated; FINISH cannot be emitted.
+    Invalidated(CaptureInvalidation),
 }
 
 impl CaptureEvent {
@@ -261,10 +283,12 @@ impl CaptureEvent {
     #[must_use]
     pub const fn kind(self) -> CaptureEventKind {
         match self {
+            Self::Scan => CaptureEventKind::Scan,
             Self::Record { .. } => CaptureEventKind::Record,
             Self::Ready { .. } => CaptureEventKind::Ready,
             Self::HistoryPage { .. } => CaptureEventKind::HistoryPage,
             Self::Finish { .. } => CaptureEventKind::Finish,
+            Self::Invalidated(_) => CaptureEventKind::Invalidated,
         }
     }
 
@@ -272,6 +296,7 @@ impl CaptureEvent {
     #[must_use]
     pub const fn written(self) -> usize {
         match self {
+            Self::Scan | Self::Invalidated(_) => 0,
             Self::Record { written }
             | Self::Ready { written }
             | Self::HistoryPage { written, .. }
@@ -332,19 +357,101 @@ unsafe extern "C" fn capture_write(
     true
 }
 
-/// A bounded progressive snapshot capture borrowing one terminal.
 #[derive(Debug)]
-pub struct Capture<'alloc, 'cb, 'terminal> {
+struct CaptureCore<'alloc> {
     inner: Object<'alloc, ffi::SnapshotCaptureImpl>,
     // Native stores a pointer to this callback context. Boxing keeps its address
-    // stable if Capture moves; Drop frees native state before the box is freed.
+    // stable if either type-state wrapper moves.
     writer: Box<CaptureWriter>,
     max_record_bytes: usize,
-    _terminal: PhantomData<&'terminal Terminal<'alloc, 'cb>>,
+}
+
+impl CaptureCore<'_> {
+    fn call(
+        &mut self,
+        buf: &mut [u8],
+        operation: impl FnOnce(
+            ffi::SnapshotCapture,
+            *mut ffi::SnapshotCaptureEvent,
+        ) -> ffi::Result::Type,
+    ) -> Result<CaptureEvent> {
+        if buf.len() < self.max_record_bytes {
+            return Err(Error::OutOfSpace {
+                required: self.max_record_bytes,
+            });
+        }
+        self.writer.begin(buf);
+        let mut raw = ffi::SnapshotCaptureEvent {
+            size: std::mem::size_of::<ffi::SnapshotCaptureEvent>(),
+            ..Default::default()
+        };
+        let result = operation(self.inner.as_raw(), &raw mut raw);
+        self.writer.end();
+        from_result(result)?;
+        if raw.written != self.writer.written || raw.written > buf.len() {
+            return Err(Error::InvalidValue);
+        }
+        capture_event(raw)
+    }
+}
+
+impl Drop for CaptureCore<'_> {
+    fn drop(&mut self) {
+        // Native releases its callback pointer before the boxed writer drops.
+        unsafe { ffi::ghostty_snapshot_capture_free(self.inner.as_raw()) };
+    }
+}
+
+fn capture_invalidation(
+    raw: ffi::SnapshotCaptureInvalidation::Type,
+) -> Result<CaptureInvalidation> {
+    match raw {
+        ffi::SnapshotCaptureInvalidation::WRONG_TERMINAL => Ok(CaptureInvalidation::WrongTerminal),
+        ffi::SnapshotCaptureInvalidation::RESET => Ok(CaptureInvalidation::Reset),
+        ffi::SnapshotCaptureInvalidation::RESIZE => Ok(CaptureInvalidation::Resize),
+        ffi::SnapshotCaptureInvalidation::MUTATION => Ok(CaptureInvalidation::Mutation),
+        ffi::SnapshotCaptureInvalidation::EVICTED => Ok(CaptureInvalidation::Evicted),
+        _ => Err(Error::InvalidValue),
+    }
+}
+
+fn capture_event(raw: ffi::SnapshotCaptureEvent) -> Result<CaptureEvent> {
+    match raw.kind {
+        ffi::SnapshotCaptureEventKind::SCAN => Ok(CaptureEvent::Scan),
+        ffi::SnapshotCaptureEventKind::RECORD => Ok(CaptureEvent::Record {
+            written: raw.written,
+        }),
+        ffi::SnapshotCaptureEventKind::READY => Ok(CaptureEvent::Ready {
+            written: raw.written,
+        }),
+        ffi::SnapshotCaptureEventKind::HISTORY_PAGE => Ok(CaptureEvent::HistoryPage {
+            screen: raw.screen.try_into().map_err(|_| Error::InvalidValue)?,
+            rows: raw.rows,
+            remaining: raw.remaining,
+            written: raw.written,
+        }),
+        ffi::SnapshotCaptureEventKind::FINISH => Ok(CaptureEvent::Finish {
+            written: raw.written,
+        }),
+        ffi::SnapshotCaptureEventKind::INVALIDATED => Ok(CaptureEvent::Invalidated(
+            capture_invalidation(raw.invalidation)?,
+        )),
+        _ => Err(Error::InvalidValue),
+    }
+}
+
+/// A bounded snapshot prefix capture borrowing one terminal through READY.
+#[derive(Debug)]
+pub struct Capture<'alloc, 'cb, 'terminal> {
+    core: CaptureCore<'alloc>,
+    terminal: &'terminal mut Terminal<'alloc, 'cb>,
 }
 
 impl<'alloc: 'cb, 'cb, 'terminal> Capture<'alloc, 'cb, 'terminal> {
-    fn new(terminal: &'terminal Terminal<'alloc, 'cb>, options: CaptureOptions) -> Result<Self> {
+    fn new(
+        terminal: &'terminal mut Terminal<'alloc, 'cb>,
+        options: CaptureOptions,
+    ) -> Result<Self> {
         if options.max_record_bytes < RECORD_HEADER_BYTES || options.max_pages == 0 {
             return Err(Error::InvalidValue);
         }
@@ -371,10 +478,12 @@ impl<'alloc: 'cb, 'cb, 'terminal> Capture<'alloc, 'cb, 'terminal> {
         };
         from_result(result)?;
         Ok(Self {
-            inner: Object::new(raw)?,
-            writer,
-            max_record_bytes: options.max_record_bytes,
-            _terminal: PhantomData,
+            core: CaptureCore {
+                inner: Object::new(raw)?,
+                writer,
+                max_record_bytes: options.max_record_bytes,
+            },
+            terminal,
         })
     }
 
@@ -384,50 +493,53 @@ impl<'alloc: 'cb, 'cb, 'terminal> Capture<'alloc, 'cb, 'terminal> {
     /// the capacity ensures native output cannot fail after partially updating
     /// the running snapshot digest.
     pub fn next(&mut self, buf: &mut [u8]) -> Result<CaptureEvent> {
-        if buf.len() < self.max_record_bytes {
-            return Err(Error::OutOfSpace {
-                required: self.max_record_bytes,
-            });
-        }
+        self.core.call(buf, |capture, event| unsafe {
+            ffi::ghostty_snapshot_capture_next(capture, event)
+        })
+    }
 
-        self.writer.begin(buf);
-        let mut raw = ffi::SnapshotCaptureEvent {
-            size: std::mem::size_of::<ffi::SnapshotCaptureEvent>(),
-            ..Default::default()
-        };
-        let result =
-            unsafe { ffi::ghostty_snapshot_capture_next(self.inner.as_raw(), &raw mut raw) };
-        self.writer.end();
+    /// Detach the O(1)-storage history cut and release the source borrow.
+    ///
+    /// This is valid only immediately after [`CaptureEvent::Ready`].
+    pub fn detach(self) -> Result<HistoryCapture<'alloc, 'cb, 'terminal>> {
+        let result = unsafe { ffi::ghostty_snapshot_capture_detach(self.core.inner.as_raw()) };
         from_result(result)?;
-
-        if raw.written != self.writer.written || raw.written > buf.len() {
-            return Err(Error::InvalidValue);
-        }
-        match raw.kind {
-            ffi::SnapshotCaptureEventKind::RECORD => Ok(CaptureEvent::Record {
-                written: raw.written,
-            }),
-            ffi::SnapshotCaptureEventKind::READY => Ok(CaptureEvent::Ready {
-                written: raw.written,
-            }),
-            ffi::SnapshotCaptureEventKind::HISTORY_PAGE => Ok(CaptureEvent::HistoryPage {
-                screen: raw.screen.try_into().map_err(|_| Error::InvalidValue)?,
-                rows: raw.rows,
-                remaining: raw.remaining,
-                written: raw.written,
-            }),
-            ffi::SnapshotCaptureEventKind::FINISH => Ok(CaptureEvent::Finish {
-                written: raw.written,
-            }),
-            _ => Err(Error::InvalidValue),
-        }
+        Ok(HistoryCapture {
+            core: self.core,
+            terminal: self.terminal,
+        })
     }
 }
 
-impl Drop for Capture<'_, '_, '_> {
-    fn drop(&mut self) {
-        // Native must release its borrowed callback pointer before writer drops.
-        unsafe { ffi::ghostty_snapshot_capture_free(self.inner.as_raw()) };
+/// A detached point-in-time history cut with mutable source access.
+#[derive(Debug)]
+pub struct HistoryCapture<'alloc, 'cb, 'terminal> {
+    core: CaptureCore<'alloc>,
+    terminal: &'terminal mut Terminal<'alloc, 'cb>,
+}
+
+impl<'alloc: 'cb, 'cb> HistoryCapture<'alloc, 'cb, '_> {
+    /// Perform one bounded history scan or record step.
+    ///
+    /// [`CaptureEvent::Scan`] inspects one page and writes no bytes. An
+    /// invalidation event is a typed tombstone and means this capture can never
+    /// produce FINISH.
+    pub fn next(&mut self, buf: &mut [u8]) -> Result<CaptureEvent> {
+        let source = self.terminal.inner.as_raw();
+        self.core.call(buf, |capture, event| unsafe {
+            ffi::ghostty_snapshot_capture_next_history(capture, source, event)
+        })
+    }
+
+    /// Borrow the canonical source terminal for rendering or inspection.
+    #[must_use]
+    pub const fn terminal(&self) -> &Terminal<'alloc, 'cb> {
+        self.terminal
+    }
+
+    /// Mutably borrow the canonical source for live PTY writes between steps.
+    pub fn terminal_mut(&mut self) -> &mut Terminal<'alloc, 'cb> {
+        self.terminal
     }
 }
 
@@ -594,6 +706,12 @@ impl<'alloc> FeedDecoder<'alloc> {
         self.core.source.bytes.len()
     }
 
+    /// Allocated capacity retained by the staging buffer.
+    #[must_use]
+    pub fn staged_capacity_bytes(&self) -> usize {
+        self.core.source.bytes.capacity()
+    }
+
     /// Set the largest accepted non-ground parser continuation.
     pub fn set_max_continuation_bytes(&mut self, value: usize) -> Result<&mut Self> {
         let result = unsafe {
@@ -663,6 +781,12 @@ impl<'alloc: 'cb, 'cb> FeedIncrementalDecoder<'alloc, 'cb> {
     #[must_use]
     pub fn staged_bytes(&self) -> usize {
         self.core.source.bytes.len()
+    }
+
+    /// Allocated capacity retained by the staging buffer.
+    #[must_use]
+    pub fn staged_capacity_bytes(&self) -> usize {
+        self.core.source.bytes.capacity()
     }
 
     /// Decode one complete staged page unit, or authenticate staged FINISH.
@@ -747,7 +871,40 @@ mod tests {
         terminal
     }
 
-    fn capture(terminal: &Terminal<'_, '_>, max_pages: usize) -> Result<Captured> {
+    fn detached_capture<'terminal>(
+        terminal: &'terminal mut Terminal<'static, 'static>,
+    ) -> HistoryCapture<'static, 'static, 'terminal> {
+        let mut capture = terminal
+            .capture_snapshot(CaptureOptions {
+                max_record_bytes: MAX_RECORD_BYTES,
+                max_pages: 1000,
+            })
+            .expect("capture");
+        let mut buf = vec![0; MAX_RECORD_BYTES];
+        loop {
+            if matches!(capture.next(&mut buf), Ok(CaptureEvent::Ready { .. })) {
+                return capture.detach().expect("detach");
+            }
+        }
+    }
+
+    fn tombstone(capture: &mut HistoryCapture<'static, 'static, '_>) -> CaptureInvalidation {
+        let mut buf = vec![0; MAX_RECORD_BYTES];
+        for _ in 0..10_000 {
+            match capture.next(&mut buf).expect("capture step") {
+                CaptureEvent::Invalidated(reason) => return reason,
+                CaptureEvent::Scan => {}
+                event => panic!("expected invalidation, got {event:?}"),
+            }
+        }
+        panic!("capture never reached an invalidation")
+    }
+
+    fn capture(
+        terminal: &mut Terminal<'_, '_>,
+        max_pages: usize,
+        write_after_ready: bool,
+    ) -> Result<Captured> {
         let mut capture = terminal.capture_snapshot(CaptureOptions {
             max_record_bytes: MAX_RECORD_BYTES,
             max_pages,
@@ -758,19 +915,32 @@ mod tests {
         let mut pending = Vec::new();
         let mut history = Vec::new();
         let finish;
-        let mut saw_ready = false;
 
         loop {
             let event = capture.next(&mut buf)?;
             let record = &buf[..event.written()];
             bytes.extend_from_slice(record);
-            if saw_ready {
-                pending.extend_from_slice(record);
-            } else {
-                ready.extend_from_slice(record);
+            ready.extend_from_slice(record);
+            if matches!(event, CaptureEvent::Ready { .. }) {
+                break;
             }
+        }
+
+        let mut capture = capture.detach()?;
+        if write_after_ready {
+            // This is the canonical source terminal, not the decoded replica.
+            // Crossing native page boundaries proves detach consumed the
+            // source borrow and ordinary append does not invalidate the cut.
+            for _ in 0..500 {
+                capture.terminal_mut().vt_write(b"\rSOURCE-LIVE\r\n");
+            }
+        }
+        loop {
+            let event = capture.next(&mut buf)?;
+            let record = &buf[..event.written()];
+            bytes.extend_from_slice(record);
+            pending.extend_from_slice(record);
             match event {
-                CaptureEvent::Ready { .. } => saw_ready = true,
                 CaptureEvent::HistoryPage {
                     screen,
                     rows,
@@ -781,7 +951,11 @@ mod tests {
                     finish = std::mem::take(&mut pending);
                     break;
                 }
-                CaptureEvent::Record { .. } => {}
+                CaptureEvent::Scan | CaptureEvent::Record { .. } => {}
+                CaptureEvent::Invalidated(reason) => {
+                    panic!("history cut unexpectedly invalidated: {reason:?}")
+                }
+                CaptureEvent::Ready { .. } => unreachable!(),
             }
         }
         Ok(Captured {
@@ -795,24 +969,30 @@ mod tests {
     #[test]
     fn bounded_capture_matches_one_shot_and_owned_feed_restores_history() {
         let mut terminal = source_terminal();
-        let captured = capture(&terminal, 1000).expect("progressive capture");
+        let mut eager = Vec::new();
+        terminal
+            .encode_snapshot(&mut eager)
+            .expect("one-shot capture");
+        let captured = capture(&mut terminal, 1000, true).expect("progressive capture");
         assert!(
             captured.history.len() > 1,
             "capture should contain multiple history pages"
         );
 
-        let mut eager = Vec::new();
-        terminal
-            .encode_snapshot(&mut eager)
-            .expect("one-shot capture");
         assert_eq!(captured.bytes, eager);
 
         let mut decoder = FeedDecoder::new(captured.bytes.len()).expect("feed decoder");
         for fragment in captured.ready.chunks(37) {
             decoder.feed(fragment).expect("READY fragment");
         }
+        assert!(decoder.staged_capacity_bytes() >= decoder.staged_bytes());
         let mut decoder = decoder.ready().expect("authenticated READY");
         assert_eq!(decoder.staged_bytes(), 0, "READY storage is released");
+        assert_eq!(
+            decoder.staged_capacity_bytes(),
+            0,
+            "READY capacity is released"
+        );
         decoder.terminal_mut().vt_write(b"\rLIVE");
 
         for (unit, screen, rows, remaining) in &captured.history {
@@ -824,6 +1004,11 @@ mod tests {
             assert_eq!(progress.rows, *rows);
             assert_eq!(progress.remaining, *remaining);
             assert_eq!(decoder.staged_bytes(), 0, "page storage is released");
+            assert_eq!(
+                decoder.staged_capacity_bytes(),
+                0,
+                "page capacity is released"
+            );
         }
         decoder.feed(&captured.finish).expect("FINISH bytes");
         assert!(decoder.next().expect("authenticated FINISH").is_none());
@@ -832,8 +1017,8 @@ mod tests {
 
     #[test]
     fn staged_decoder_rejects_truncated_finish_instead_of_finishing() {
-        let terminal = source_terminal();
-        let captured = capture(&terminal, 1000).expect("capture");
+        let mut terminal = source_terminal();
+        let captured = capture(&mut terminal, 1000, false).expect("capture");
         let mut decoder = FeedDecoder::new(captured.bytes.len()).expect("decoder");
         decoder.feed(&captured.ready).expect("READY");
         let mut decoder = decoder.ready().expect("ready");
@@ -850,8 +1035,8 @@ mod tests {
 
     #[test]
     fn staged_decoder_rejects_a_truncated_history_page() {
-        let terminal = source_terminal();
-        let captured = capture(&terminal, 1000).expect("capture");
+        let mut terminal = source_terminal();
+        let captured = capture(&mut terminal, 1000, false).expect("capture");
         let mut decoder = FeedDecoder::new(captured.bytes.len()).expect("decoder");
         decoder.feed(&captured.ready).expect("READY");
         let mut decoder = decoder.ready().expect("ready");
@@ -865,7 +1050,7 @@ mod tests {
 
     #[test]
     fn capture_page_limit_fails_before_emitting_an_excess_page() {
-        let terminal = source_terminal();
+        let mut terminal = source_terminal();
         let mut capture = terminal
             .capture_snapshot(CaptureOptions {
                 max_record_bytes: MAX_RECORD_BYTES,
@@ -873,6 +1058,12 @@ mod tests {
             })
             .expect("capture");
         let mut buf = vec![0; MAX_RECORD_BYTES];
+        loop {
+            if matches!(capture.next(&mut buf), Ok(CaptureEvent::Ready { .. })) {
+                break;
+            }
+        }
+        let mut capture = capture.detach().expect("detach");
         let mut pages = 0;
         loop {
             match capture.next(&mut buf) {
@@ -883,12 +1074,12 @@ mod tests {
                 Err(error) => panic!("unexpected capture error: {error}"),
             }
         }
-        assert_eq!(pages, 1);
+        assert_eq!(pages, 0, "limit is found during the bounded scan");
     }
 
     #[test]
     fn capture_record_limit_reports_limit_exceeded() {
-        let terminal = source_terminal();
+        let mut terminal = source_terminal();
         let mut capture = terminal
             .capture_snapshot(CaptureOptions {
                 max_record_bytes: RECORD_HEADER_BYTES,
@@ -901,6 +1092,33 @@ mod tests {
             Ok(CaptureEvent::Record { .. })
         ));
         assert!(matches!(capture.next(&mut buf), Err(Error::LimitExceeded)));
+    }
+
+    #[test]
+    fn detached_capture_reports_resize_reset_and_eviction_tombstones() {
+        let mut resized = source_terminal();
+        let mut resized_capture = detached_capture(&mut resized);
+        resized_capture
+            .terminal_mut()
+            .resize(201, 3, 0, 0)
+            .expect("resize");
+        assert_eq!(tombstone(&mut resized_capture), CaptureInvalidation::Resize);
+
+        let mut reset = source_terminal();
+        let mut reset_capture = detached_capture(&mut reset);
+        reset_capture.terminal_mut().reset();
+        assert_eq!(tombstone(&mut reset_capture), CaptureInvalidation::Reset);
+
+        let mut evicted = source_terminal();
+        let mut evicted_capture = detached_capture(&mut evicted);
+        evicted_capture
+            .terminal_mut()
+            .set_scrollback_max_lines(Some(1))
+            .expect("prune scrollback");
+        assert_eq!(
+            tombstone(&mut evicted_capture),
+            CaptureInvalidation::Evicted
+        );
     }
 }
 

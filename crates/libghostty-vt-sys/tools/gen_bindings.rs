@@ -119,6 +119,10 @@ const PREFIXES: &[(&str, &str)] = &[
         "GhosttySnapshotCaptureEventKind",
         "GHOSTTY_SNAPSHOT_CAPTURE_EVENT",
     ),
+    (
+        "GhosttySnapshotCaptureInvalidation",
+        "GHOSTTY_SNAPSHOT_CAPTURE_INVALIDATION",
+    ),
 ];
 
 #[derive(Debug)]
