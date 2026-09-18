@@ -115,3 +115,12 @@ fn main() {
 
     build_vendored(link_mode, &target);
 }
+
+include!("build_vendored.rs");
+include!("build_zig_cmd.rs");
+include!("build_zig_link.rs");
+include!("link_emit.rs");
+include!("optimize.rs");
+include!("fetch_ghostty.rs");
+include!("xcframework.rs");
+include!("copy_dir.rs");
