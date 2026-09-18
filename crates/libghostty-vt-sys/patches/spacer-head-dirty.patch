@@ -1,0 +1,59 @@
+diff --git a/src/terminal/Screen.zig b/src/terminal/Screen.zig
+index 41149f6da..517693e4b 100644
+--- a/src/terminal/Screen.zig
++++ b/src/terminal/Screen.zig
+@@ -754,6 +754,20 @@ pub fn cursorCellEndOfPrev(self: *Screen) *pagepkg.Cell {
+     return page_rac.cell;
+ }
+ 
++/// If the previous row ends with a spacer_head for a wide glyph that
++/// wrapped onto this row, convert it to a narrow cell and mark that
++/// row dirty so a pooled RenderState copies the rewrite.
++pub fn narrowPrevWrapSpacerHead(self: *Screen) void {
++    assert(self.cursor.y > 0);
++    var page_pin = self.cursor.page_pin.up(1).?;
++    page_pin.x = page_pin.node.cols() - 1;
++    const page_rac = page_pin.rowAndCell();
++    if (page_rac.cell.wide == .spacer_head) {
++        page_rac.cell.wide = .narrow;
++        page_rac.row.dirty = true;
++    }
++}
++
+ /// Move the cursor right. This is a specialized function that is very fast
+ /// if the caller can guarantee we have space to move right (no wrapping).
+ pub fn cursorRight(self: *Screen, n: size.CellCountInt) void {
+@@ -1899,6 +1913,10 @@ pub fn splitCellBoundary(
+                         p_rac.row,
+                         p_cells[p_row.node.cols() - 1 ..][0..1],
+                     );
++                    // clearCells rewrites a different row than the one
++                    // the caller will mark dirty. Without this, a pooled
++                    // RenderState keeps the stale spacer-head pen.
++                    p_rac.row.dirty = true;
+                 }
+             }
+         }
+diff --git a/src/terminal/Terminal.zig b/src/terminal/Terminal.zig
+index ffabce2fb..c4e0placeholder 100644
+--- a/src/terminal/Terminal.zig
++++ b/src/terminal/Terminal.zig
+@@ -1548,8 +1548,7 @@ fn printCell(
+                 // at the end of that row. Clear it so the previous row
+                 // doesn't keep a stale spacer_head.
+                 if (self.screens.active.cursor.y > 0 and self.screens.active.cursor.x <= 1) {
+-                    const head_cell = self.screens.active.cursorCellEndOfPrev();
+-                    if (head_cell.wide == .spacer_head) head_cell.wide = .narrow;
++                    self.screens.active.narrowPrevWrapSpacerHead();
+                 }
+             },
+ 
+@@ -1573,8 +1572,7 @@ fn printCell(
+                 // at the end of that row. Clear it so the previous row
+                 // doesn't keep a stale spacer_head.
+                 if (self.screens.active.cursor.y > 0 and self.screens.active.cursor.x <= 1) {
+-                    const head_cell = self.screens.active.cursorCellEndOfPrev();
+-                    if (head_cell.wide == .spacer_head) head_cell.wide = .narrow;
++                    self.screens.active.narrowPrevWrapSpacerHead();
+                 }
+             },
