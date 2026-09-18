@@ -117,8 +117,6 @@ fn main() {
 }
 
 include!("build_vendored.rs");
-include!("build_zig_cmd.rs");
-include!("build_zig_link.rs");
 include!("link_emit.rs");
 include!("optimize.rs");
 include!("fetch_ghostty.rs");
