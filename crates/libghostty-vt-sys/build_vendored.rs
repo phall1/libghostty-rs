@@ -4,32 +4,6 @@ fn build_vendored(link_mode: LinkMode, target: &str) {
     let out_dir = PathBuf::from(env::var("OUT_DIR").expect("OUT_DIR must be set"));
     let host = env::var("HOST").expect("HOST must be set");
 
-    // Locate ghostty source: env override > fetch into OUT_DIR.
-    let ghostty_dir = match env::var("GHOSTTY_SOURCE_DIR") {
-        Ok(dir) => {
-            let p = PathBuf::from(dir);
-            assert!(
-                p.join("build.zig").exists(),
-                "GHOSTTY_SOURCE_DIR does not contain build.zig: {}",
-                p.display()
-            );
-            p
-        }
-        Err(_) => fetch_ghostty(&out_dir),
-    };
-
-    // Build libghostty-vt via zig.
-    let install_prefix = out_dir.join("ghostty-install");
-    let zig_cache_dir = out_dir.join("zig-cache");
-    let zig_global_cache_dir = out_dir.join("zig-global-cache");
-
-    let optimize = zig_optimize_mode();
-    let cpu = env::var("LIBGHOSTTY_VT_SYS_CPU").unwrap_or_else(|_| "baseline".to_owned());
-    assert!(
-        !cpu.is_empty(),
-        "LIBGHOSTTY_VT_SYS_CPU must not be empty when set"
-    );
-
     // iOS builds go through ghostty's emit-xcframework path instead of a flat
     // `-Dtarget=<ios> --sysroot=<sdk>` invocation. The flat build breaks down
     // for iOS: a generic target baseline can't compile simdutf's always_inline
@@ -58,63 +32,32 @@ fn build_vendored(link_mode: LinkMode, target: &str) {
         );
     }
 
-    let mut build = Command::new("zig");
-    build
-        .arg("build")
-        .arg("-Demit-lib-vt=true")
-        .arg(format!("-Doptimize={optimize}"))
-        // Cargo artifacts may run on older CPUs than the build host. Without
-        // an explicit CPU model, Zig may emit host-specific instructions that
-        // make distributed binaries fail with an illegal instruction. Users
-        // building for a known machine can explicitly request `native` or a
-        // named Zig CPU model through LIBGHOSTTY_VT_SYS_CPU.
-        //
-        // For iOS builds this only affects the host-native flat artifacts:
-        // ghostty resolves its own per-platform targets for the xcframework
-        // slices, so -Dcpu does not leak into them.
-        .arg(format!("-Dcpu={cpu}"))
-        .arg(if ios_platform.is_some() {
-            "-Demit-xcframework=true"
-        } else {
-            "-Demit-xcframework=false"
-        })
-        .arg("-Dapp-runtime=none")
-        .arg("--prefix")
-        .arg(&install_prefix)
-        .arg("--cache-dir")
-        .arg(&zig_cache_dir)
-        .current_dir(&ghostty_dir);
+    let zig = ZigBuild {
+        target,
+        host: &host,
+        ios_platform,
+        optimize: zig_optimize_mode(),
+        cpu: zig_cpu(),
+    };
+    let install_prefix = out_dir.join("ghostty-install");
 
-    // Package managers can provide Ghostty's Zig package cache ahead of time
-    // and ask Zig to resolve packages from that immutable store path instead
-    // of fetching during this Cargo build script.
-    if let Ok(dir) = env::var("GHOSTTY_ZIG_SYSTEM_DIR") {
+    // Locate ghostty source: env override > shared per-user build > fetch
+    // into OUT_DIR. An override is a live checkout whose contents can change
+    // under the same path, so it never goes through the shared cache.
+    if let Ok(dir) = env::var("GHOSTTY_SOURCE_DIR") {
+        let ghostty_dir = PathBuf::from(dir);
         assert!(
-            !dir.is_empty(),
-            "GHOSTTY_ZIG_SYSTEM_DIR must not be empty when set"
+            ghostty_dir.join("build.zig").exists(),
+            "GHOSTTY_SOURCE_DIR does not contain build.zig: {}",
+            ghostty_dir.display()
         );
-        let zig_system_dir = PathBuf::from(dir);
-        assert!(
-            zig_system_dir.exists(),
-            "GHOSTTY_ZIG_SYSTEM_DIR does not exist: {}",
-            zig_system_dir.display()
-        );
-        build
-            .arg("--system")
-            .arg(&zig_system_dir)
-            .arg("--global-cache-dir")
-            .arg(&zig_global_cache_dir);
+        zig.run(&ghostty_dir, &install_prefix, &out_dir);
+    } else if let Some(root) = shared_build_root() {
+        build_shared(&root, &zig, &install_prefix);
+    } else {
+        let ghostty_dir = fetch_ghostty(&out_dir);
+        zig.run(&ghostty_dir, &install_prefix, &out_dir);
     }
-
-    // Pass -Dtarget only for non-iOS cross targets; native builds let zig
-    // auto-detect the host. iOS builds run host-native inside the xcframework
-    // emit, so they must not pass -Dtarget or a global --sysroot.
-    if target != host && ios_platform.is_none() {
-        let zig_target = zig_target(target);
-        build.arg(format!("-Dtarget={zig_target}"));
-    }
-
-    run(build, "zig build");
 
     // The emit also installs host-native flat artifacts; replace them with the
     // iOS library so the link emission below picks up the right arch.
@@ -164,4 +107,96 @@ fn build_vendored(link_mode: LinkMode, target: &str) {
         LinkMode::Static => emit_static_link_lib(target),
     }
     emit_include_metadata(&[include_dir]);
+}
+
+/// One `zig build` of libghostty-vt: everything that decides its output.
+struct ZigBuild<'a> {
+    target: &'a str,
+    host: &'a str,
+    ios_platform: Option<&'static str>,
+    optimize: &'static str,
+    cpu: String,
+}
+
+fn zig_cpu() -> String {
+    let cpu = env::var("LIBGHOSTTY_VT_SYS_CPU").unwrap_or_else(|_| "baseline".to_owned());
+    assert!(
+        !cpu.is_empty(),
+        "LIBGHOSTTY_VT_SYS_CPU must not be empty when set"
+    );
+    cpu
+}
+
+impl ZigBuild<'_> {
+    /// Build `ghostty_dir` into `install_prefix`, keeping Zig's caches in
+    /// `work_dir`.
+    fn run(&self, ghostty_dir: &Path, install_prefix: &Path, work_dir: &Path) {
+        let zig_cache_dir = work_dir.join("zig-cache");
+        let zig_global_cache_dir = work_dir.join("zig-global-cache");
+        let (target, host, ios_platform, optimize, cpu) = (
+            self.target,
+            self.host,
+            self.ios_platform,
+            self.optimize,
+            &self.cpu,
+        );
+
+        let mut build = Command::new("zig");
+        build
+            .arg("build")
+            .arg("-Demit-lib-vt=true")
+            .arg(format!("-Doptimize={optimize}"))
+            // Cargo artifacts may run on older CPUs than the build host. Without
+            // an explicit CPU model, Zig may emit host-specific instructions that
+            // make distributed binaries fail with an illegal instruction. Users
+            // building for a known machine can explicitly request `native` or a
+            // named Zig CPU model through LIBGHOSTTY_VT_SYS_CPU.
+            //
+            // For iOS builds this only affects the host-native flat artifacts:
+            // ghostty resolves its own per-platform targets for the xcframework
+            // slices, so -Dcpu does not leak into them.
+            .arg(format!("-Dcpu={cpu}"))
+            .arg(if ios_platform.is_some() {
+                "-Demit-xcframework=true"
+            } else {
+                "-Demit-xcframework=false"
+            })
+            .arg("-Dapp-runtime=none")
+            .arg("--prefix")
+            .arg(install_prefix)
+            .arg("--cache-dir")
+            .arg(&zig_cache_dir)
+            .current_dir(ghostty_dir);
+
+        // Package managers can provide Ghostty's Zig package cache ahead of time
+        // and ask Zig to resolve packages from that immutable store path instead
+        // of fetching during this Cargo build script.
+        if let Ok(dir) = env::var("GHOSTTY_ZIG_SYSTEM_DIR") {
+            assert!(
+                !dir.is_empty(),
+                "GHOSTTY_ZIG_SYSTEM_DIR must not be empty when set"
+            );
+            let zig_system_dir = PathBuf::from(dir);
+            assert!(
+                zig_system_dir.exists(),
+                "GHOSTTY_ZIG_SYSTEM_DIR does not exist: {}",
+                zig_system_dir.display()
+            );
+            build
+                .arg("--system")
+                .arg(&zig_system_dir)
+                .arg("--global-cache-dir")
+                .arg(&zig_global_cache_dir);
+        }
+
+        // Pass -Dtarget only for non-iOS cross targets; native builds let zig
+        // auto-detect the host. iOS builds run host-native inside the xcframework
+        // emit, so they must not pass -Dtarget or a global --sysroot.
+        if target != host && ios_platform.is_none() {
+            let zig_target = zig_target(target);
+            build.arg(format!("-Dtarget={zig_target}"));
+        }
+
+        run(build, "zig build");
+    }
 }

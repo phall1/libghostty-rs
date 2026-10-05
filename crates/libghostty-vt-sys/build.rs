@@ -94,8 +94,22 @@ fn main() {
     println!("cargo:rerun-if-env-changed=HOST");
     println!("cargo:rerun-if-env-changed=DEBUG");
     println!("cargo:rerun-if-env-changed=OPT_LEVEL");
-    println!("cargo:rerun-if-changed=crates/libghostty-vt-sys/build.rs");
-    println!("cargo:rerun-if-changed=patches/spacer-head-dirty.patch");
+    // Paths are relative to this package. Naming any path replaces Cargo's
+    // default of watching the whole package, so list every file the build
+    // script compiles in as well as the patch it applies.
+    for path in [
+        "build.rs",
+        "build_vendored.rs",
+        "copy_dir.rs",
+        "fetch_ghostty.rs",
+        "link_emit.rs",
+        "optimize.rs",
+        "shared_build.rs",
+        "xcframework.rs",
+        "patches/spacer-head-dirty.patch",
+    ] {
+        println!("cargo:rerun-if-changed={path}");
+    }
 
     // An explicit source override should stay authoritative even when the
     // pkg-config feature is enabled, so local Ghostty checkouts remain easy to
@@ -122,3 +136,4 @@ include!("optimize.rs");
 include!("fetch_ghostty.rs");
 include!("xcframework.rs");
 include!("copy_dir.rs");
+include!("shared_build.rs");

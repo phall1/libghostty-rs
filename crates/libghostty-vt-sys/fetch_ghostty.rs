@@ -49,7 +49,7 @@ fn fetch_ghostty(out_dir: &Path) -> PathBuf {
 /// Mark the previous row dirty when a wrapped wide glyph's spacer_head is
 /// rewritten (ECH/print). Drop this once the ghostty pin includes the fix.
 fn apply_wrap_spacer_head_patch(src_dir: &Path) {
-    let patch = Path::new(env!("CARGO_MANIFEST_DIR")).join("patches/spacer-head-dirty.patch");
+    let patch = wrap_spacer_head_patch();
     assert!(
         patch.exists(),
         "missing wrap spacer-head dirty patch at {}",
@@ -58,4 +58,8 @@ fn apply_wrap_spacer_head_patch(src_dir: &Path) {
     let mut apply = Command::new("git");
     apply.arg("apply").arg(&patch).current_dir(src_dir);
     run(apply, "git apply spacer-head-dirty patch");
+}
+
+fn wrap_spacer_head_patch() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("patches/spacer-head-dirty.patch")
 }
