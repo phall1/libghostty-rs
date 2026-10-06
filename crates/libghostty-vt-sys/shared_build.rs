@@ -94,13 +94,20 @@ fn build_shared_dir(dir: &Path, zig: &ZigBuild) {
     let ghostty_dir = fetch_ghostty(dir);
     zig.run(&ghostty_dir, &dir.join("ghostty-install"), dir);
 
-    // The installed artifacts are all later builds read. The Zig cache is
-    // the bulk of the directory and nothing rebuilds from it; the source
-    // stays so debug info resolves.
-    let zig_cache = dir.join("zig-cache");
-    if zig_cache.exists() {
-        std::fs::remove_dir_all(&zig_cache)
-            .unwrap_or_else(|error| panic!("failed to remove {}: {error}", zig_cache.display()));
+    // The installed artifacts are all later builds read, so drop what only
+    // the build itself needed: the Zig cache, the packages Zig fetched into
+    // the source tree, and the clone's history. Together they are about
+    // three quarters of the directory. Ghostty's own source stays so its
+    // debug info resolves.
+    for scratch in [
+        dir.join("zig-cache"),
+        ghostty_dir.join("zig-pkg"),
+        ghostty_dir.join(".git"),
+    ] {
+        if scratch.exists() {
+            std::fs::remove_dir_all(&scratch)
+                .unwrap_or_else(|error| panic!("failed to remove {}: {error}", scratch.display()));
+        }
     }
 }
 
