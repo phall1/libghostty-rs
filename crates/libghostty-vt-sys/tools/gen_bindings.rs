@@ -93,6 +93,17 @@ const PREFIXES: &[(&str, &str)] = &[
     ("GhosttySgrAttributeTag", "GHOSTTY_SGR_ATTR"),
     ("GhosttyOscCommandData", "GHOSTTY_OSC_DATA"),
     ("GhosttyOscCommandType", "GHOSTTY_OSC_COMMAND"),
+    ("GhosttyOscOption", "GHOSTTY_OSC_OPT"),
+    ("GhosttySearchOption", "GHOSTTY_SEARCH_OPT"),
+    ("GhosttySemanticPromptKind", "GHOSTTY_SEMANTIC_PROMPT"),
+    (
+        "GhosttySemanticPromptPromptKind",
+        "GHOSTTY_SEMANTIC_PROMPT_PROMPT",
+    ),
+    (
+        "GhosttyTerminalUnknownSequenceTag",
+        "GHOSTTY_TERMINAL_UNKNOWN_SEQUENCE",
+    ),
     ("GhosttyTerminalOption", "GHOSTTY_TERMINAL_OPT"),
     (
         "GhosttyTerminalScrollViewportTag",

@@ -118,7 +118,6 @@ fn shared_build_key(zig: &ZigBuild) -> String {
     key.write(env!("CARGO_PKG_VERSION"));
     key.write(GHOSTTY_REPO);
     key.write(GHOSTTY_COMMIT);
-    key.write(&file_text(&wrap_spacer_head_patch()));
     key.write(zig.target);
     key.write(zig.host);
     key.write(zig.ios_platform.unwrap_or(""));
@@ -142,12 +141,6 @@ fn zig_version() -> String {
         output.status
     );
     String::from_utf8_lossy(&output.stdout).trim().to_owned()
-}
-
-fn file_text(path: &Path) -> String {
-    let bytes = std::fs::read(path)
-        .unwrap_or_else(|error| panic!("failed to read {}: {error}", path.display()));
-    String::from_utf8_lossy(&bytes).into_owned()
 }
 
 fn touch(path: &Path) {

@@ -4,7 +4,7 @@ use std::process::Command;
 
 /// Pinned ghostty commit. Update this to pull a newer version.
 const GHOSTTY_REPO: &str = "https://github.com/phall1/ghostty.git";
-const GHOSTTY_COMMIT: &str = "03c6f818eaeadf76e66dda99ab5529c9b47fa15c";
+const GHOSTTY_COMMIT: &str = "29d5e622ea1e39b32ed31afa2f79de6bf20a3e73";
 
 /// File name of the static archive on Windows. Ghostty installs it under this
 /// name for every Windows ABI so it does not collide with `ghostty-vt.lib`,
@@ -96,7 +96,7 @@ fn main() {
     println!("cargo:rerun-if-env-changed=OPT_LEVEL");
     // Paths are relative to this package. Naming any path replaces Cargo's
     // default of watching the whole package, so list every file the build
-    // script compiles in as well as the patch it applies.
+    // script compiles in.
     for path in [
         "build.rs",
         "build_vendored.rs",
@@ -106,7 +106,6 @@ fn main() {
         "optimize.rs",
         "shared_build.rs",
         "xcframework.rs",
-        "patches/spacer-head-dirty.patch",
     ] {
         println!("cargo:rerun-if-changed={path}");
     }

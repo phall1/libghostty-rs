@@ -3,7 +3,7 @@
 //! A formatter captures a reference to a terminal and formatting options.
 //! It can be used repeatedly to produce output that reflects the current
 //! terminal state at the time of each format call.
-use std::{marker::PhantomData, ptr::NonNull};
+use std::marker::PhantomData;
 
 use crate::{
     alloc::{Allocator, Bytes, Object},
@@ -205,8 +205,7 @@ impl<'t, 'alloc: 'cb, 'cb: 't> Formatter<'t, 'alloc, 'cb> {
         };
         from_result(result)?;
 
-        let ptr = NonNull::new(bytes).ok_or(Error::OutOfMemory)?;
-        Ok(unsafe { Bytes::from_raw_parts(ptr, len, alloc) })
+        Ok(unsafe { Bytes::from_alloc_output(bytes, len, alloc) })
     }
 
     /// Run the formatter and produce output into the caller-provided buffer.
@@ -258,7 +257,7 @@ impl Drop for Formatter<'_, '_, '_> {
 }
 
 /// Output format.
-#[repr(u32)]
+#[repr(i32)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, int_enum::IntEnum)]
 pub enum Format {
     /// Plain text (no escape sequences).
@@ -304,5 +303,25 @@ mod tests {
             .format_buf(&mut output)
             .expect("selection should format");
         assert_eq!(&output[..len], b"bcd");
+    }
+
+    /// libghostty reports empty output as a NULL buffer; it must come back
+    /// as an empty buffer rather than an allocation failure.
+    #[test]
+    fn format_alloc_returns_empty_output() {
+        let terminal = Terminal::new(8, 3).expect("terminal should initialize");
+        let mut formatter = Formatter::new(
+            &terminal,
+            FormatterOptions::new()
+                .with_format(Format::Plain)
+                .with_trim(true),
+        )
+        .expect("formatter should initialize");
+
+        let output = formatter.format_alloc(None).expect("empty output");
+        assert!(output.is_empty());
+
+        let empty = Bytes::new(0).expect("zero-length allocation");
+        assert!(empty.is_empty());
     }
 }

@@ -76,11 +76,12 @@ impl<'alloc> Parser<'alloc> {
     /// calling program. For commands that do not require a response, this
     /// parameter is ignored and the resulting command will not retain the
     /// terminator information.
-    #[expect(clippy::missing_panics_doc, reason = "internal invariant")]
     pub fn end<'p>(&'p mut self, terminator: u8) -> Command<'p, 'alloc> {
         let raw = unsafe { ffi::ghostty_osc_end(self.0.as_raw(), terminator) };
         Command {
-            inner: Object::new(raw).expect("command must not be null"),
+            // libghostty returns NULL for an invalid or cancelled (CAN/SUB)
+            // sequence; that command reports `CommandType::Invalid`.
+            inner: Object::new(raw).ok(),
             _parser: PhantomData,
         }
     }
@@ -97,7 +98,8 @@ impl Drop for Parser<'_> {
 /// The command can be queried for its type and associated data.
 #[derive(Debug)]
 pub struct Command<'p, 'alloc> {
-    inner: Object<'alloc, ffi::OscCommandImpl>,
+    /// `None` when the sequence was invalid or cancelled.
+    inner: Option<Object<'alloc, ffi::OscCommandImpl>>,
     _parser: PhantomData<&'p Parser<'alloc>>,
 }
 
@@ -112,13 +114,13 @@ impl<'p> Command<'p, '_> {
     }
 
     fn command_type_inner(&self) -> Option<CommandType<'p>> {
-        use ffi::OscCommandData as Data;
         use ffi::OscCommandType as Type;
 
-        let raw_type = unsafe { ffi::ghostty_osc_command_type(self.inner.as_raw()) };
+        let inner = self.inner.as_ref()?;
+        let raw_type = unsafe { ffi::ghostty_osc_command_type(inner.as_raw()) };
         Some(match raw_type {
             Type::CHANGE_WINDOW_TITLE => CommandType::ChangeWindowTitle {
-                title: self.get(Data::CHANGE_WINDOW_TITLE_STR)?,
+                title: self.title()?,
             },
             Type::CHANGE_WINDOW_ICON => CommandType::ChangeWindowIcon,
             Type::SEMANTIC_PROMPT => CommandType::SemanticPrompt,
@@ -148,10 +150,24 @@ impl<'p> Command<'p, '_> {
         })
     }
 
+    /// The window title. The C API hands out a NUL-terminated `const char*`,
+    /// not a Rust `&str`, so it is read as a pointer and validated.
+    fn title(&self) -> Option<&'p str> {
+        let ptr =
+            self.get::<*const std::ffi::c_char>(ffi::OscCommandData::CHANGE_WINDOW_TITLE_STR)?;
+        if ptr.is_null() {
+            return None;
+        }
+        // SAFETY: libghostty returns a NUL-terminated string owned by the
+        // parser, which `'p` keeps borrowed and unmodified.
+        unsafe { std::ffi::CStr::from_ptr(ptr) }.to_str().ok()
+    }
+
     fn get<T>(&self, tag: ffi::OscCommandData::Type) -> Option<T> {
+        let inner = self.inner.as_ref()?;
         let mut value = MaybeUninit::<T>::zeroed();
         let result = unsafe {
-            ffi::ghostty_osc_command_data(self.inner.as_raw(), tag, value.as_mut_ptr().cast())
+            ffi::ghostty_osc_command_data(inner.as_raw(), tag, value.as_mut_ptr().cast())
         };
 
         if result {
@@ -164,7 +180,7 @@ impl<'p> Command<'p, '_> {
 }
 
 /// Type of an OSC command.
-#[repr(u32)]
+#[repr(i32)]
 #[derive(Debug, Clone, Default)]
 #[expect(missing_docs, reason = "missing upstream docs")]
 pub enum CommandType<'p> {
@@ -195,4 +211,43 @@ pub enum CommandType<'p> {
     ConemuXtermEmulation,
     ConemuComment,
     KittyTextSizing,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn parse(parser: &mut Parser<'_>, input: &[u8]) {
+        parser.reset();
+        for &byte in input {
+            parser.next_byte(byte);
+        }
+    }
+
+    #[test]
+    fn title_command_parses() {
+        let mut parser = Parser::new().unwrap();
+        parse(&mut parser, b"2;hello");
+        match parser.end(0x07).command_type() {
+            CommandType::ChangeWindowTitle { title } => assert_eq!(title, "hello"),
+            other => panic!("unexpected command {other:?}"),
+        }
+    }
+
+    /// libghostty returns a NULL command for invalid and cancelled
+    /// sequences; both must surface as `Invalid` rather than panic.
+    #[test]
+    fn invalid_and_cancelled_sequences_are_invalid() {
+        let mut parser = Parser::new().unwrap();
+        parse(&mut parser, b"2;hello");
+        assert!(matches!(
+            parser.end(0x18).command_type(),
+            CommandType::Invalid
+        ));
+        parse(&mut parser, b"not a command");
+        assert!(matches!(
+            parser.end(0x07).command_type(),
+            CommandType::Invalid
+        ));
+    }
 }

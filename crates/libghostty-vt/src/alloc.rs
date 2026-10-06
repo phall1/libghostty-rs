@@ -112,9 +112,35 @@ impl<'alloc> Bytes<'alloc> {
     }
 
     unsafe fn new_inner(alloc: *const ffi::Allocator, len: usize) -> Result<Self> {
+        // libghostty returns NULL for a zero-length allocation.
+        if len == 0 {
+            return Ok(unsafe { Self::from_alloc_output(std::ptr::null_mut(), 0, alloc) });
+        }
         let raw = unsafe { ffi::ghostty_alloc(alloc, len) };
         let ptr = NonNull::new(raw).ok_or(Error::OutOfMemory)?;
         Ok(unsafe { Self::from_raw_parts(ptr, len, alloc) })
+    }
+
+    /// Wrap a buffer a successful libghostty `*_alloc` call returned.
+    ///
+    /// libghostty reports empty output as a NULL pointer with a zero length,
+    /// which becomes an empty buffer here.
+    ///
+    /// # Safety
+    ///
+    /// `ptr` and `len` must come from a successful libghostty allocation
+    /// made with `alloc`, or `ptr` must be NULL with `len` zero.
+    pub(crate) unsafe fn from_alloc_output(
+        ptr: *mut u8,
+        len: usize,
+        alloc: *const ffi::Allocator,
+    ) -> Self {
+        if let Some(ptr) = NonNull::new(ptr) {
+            unsafe { Self::from_raw_parts(ptr, len, alloc) }
+        } else {
+            debug_assert_eq!(len, 0, "NULL libghostty buffer with nonzero length");
+            unsafe { Self::from_raw_parts(NonNull::dangling(), 0, alloc) }
+        }
     }
 
     pub(crate) unsafe fn from_raw_parts(
@@ -132,6 +158,11 @@ impl<'alloc> Bytes<'alloc> {
 }
 impl Drop for Bytes<'_> {
     fn drop(&mut self) {
+        // Empty buffers own no allocation (see `from_alloc_output`), and
+        // freeing zero bytes is a no-op for libghostty's allocators.
+        if self.len == 0 {
+            return;
+        }
         // SAFETY: The lifetime dictates that the allocator must
         // remain valid through here. We retain ownership of the bytes
         // memory itself so it should not be freed beforehand.

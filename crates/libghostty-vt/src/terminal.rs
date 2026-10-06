@@ -229,7 +229,7 @@ pub struct Terminal<'alloc: 'cb, 'cb> {
 }
 
 /// Default visual style used when the cursor style is reset.
-#[repr(u32)]
+#[repr(i32)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, int_enum::IntEnum)]
 #[non_exhaustive]
 pub enum CursorStyle {
@@ -636,9 +636,7 @@ impl<'alloc: 'cb, 'cb> Terminal<'alloc, 'cb> {
         };
 
         let out = from_optional_result(result, out)?;
-        Ok(out
-            .and_then(NonNull::new)
-            .map(|ptr| unsafe { Bytes::from_raw_parts(ptr, out_len, alloc) }))
+        Ok(out.map(|ptr| unsafe { Bytes::from_alloc_output(ptr, out_len, alloc) }))
     }
 
     /// Copy the terminal's replay-safe VT continuation into a caller buffer.
@@ -1450,7 +1448,7 @@ impl From<TertiaryDeviceAttributes> for ffi::DeviceAttributesTertiary {
 
 /// Color scheme reported in response to a CSI ? 996 n query.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-#[repr(u32)]
+#[repr(i32)]
 #[expect(missing_docs, reason = "self-explanatory")]
 pub enum ColorScheme {
     Light = ffi::ColorScheme::LIGHT,
@@ -1496,7 +1494,7 @@ impl From<ColorScheme> for ffi::ColorScheme::Type {
 
 /// Amount of compression work to perform before returning.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, int_enum::IntEnum)]
-#[repr(u32)]
+#[repr(i32)]
 pub enum CompressionMode {
     /// Perform one bounded compression step suitable for idle scheduling.
     Incremental = ffi::TerminalCompressionMode::INCREMENTAL,
@@ -1506,7 +1504,7 @@ pub enum CompressionMode {
 
 /// Scheduling result from terminal compression.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, int_enum::IntEnum)]
-#[repr(u32)]
+#[repr(i32)]
 pub enum CompressionResult {
     /// Retained-mapping reclamation is unavailable on this target.
     Unsupported = ffi::TerminalCompressionResult::UNSUPPORTED,
@@ -1643,7 +1641,7 @@ impl<'t> ClipboardContent<'t> {
 /// Protocol-specific destination identifiers are normalized to these values
 /// before the clipboard write callback is invoked.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, int_enum::IntEnum)]
-#[repr(u32)]
+#[repr(i32)]
 pub enum ClipboardLocation {
     /// The standard system clipboard.
     Standard = ffi::ClipboardLocation::STANDARD,
@@ -1658,7 +1656,7 @@ pub enum ClipboardLocation {
 /// Protocols without write acknowledgements, including OSC 52 and iTerm2
 /// OSC 1337 Copy, ignore this result.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, int_enum::IntEnum)]
-#[repr(u32)]
+#[repr(i32)]
 pub enum ClipboardWriteError {
     /// The clipboard write was denied by policy or the user.
     Denied = ffi::ClipboardWriteResult::DENIED,
@@ -1737,7 +1735,7 @@ impl<'t> ProgressReport<'t> {
 
 /// State of a terminal progress report.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, int_enum::IntEnum)]
-#[repr(u32)]
+#[repr(i32)]
 #[non_exhaustive]
 pub enum ProgressState {
     /// Remove any visible progress indication.
@@ -1921,6 +1919,33 @@ macro_rules! handlers {
     };
 }
 
+/// Answer a clipboard write request through its reply function.
+///
+/// The C API answers clipboard writes by calling `write->reply` before the
+/// callback returns rather than through the callback's return value.
+///
+/// # Safety
+///
+/// `write` must be the request passed to the currently running clipboard
+/// write callback.
+unsafe fn reply_clipboard_write(
+    write: *const ffi::ClipboardWrite,
+    result: ffi::ClipboardWriteResult::Type,
+) {
+    // SAFETY: Upheld by caller.
+    let Some(reply_fn) = (unsafe { (*write).reply }) else {
+        // Nothing to answer through; the terminal treats it as denied.
+        return;
+    };
+    let reply = ffi::ClipboardWriteReply {
+        size: std::mem::size_of::<ffi::ClipboardWriteReply>(),
+        result,
+        remember: false,
+    };
+    // SAFETY: `write` is the live request and `reply` outlives the call.
+    unsafe { reply_fn(write, &raw const reply) };
+}
+
 handlers! {
     /// Call the given function when the terminal needs to write data back
     /// to the pty (e.g. in response to a DECRQM query or device status report).
@@ -2065,18 +2090,26 @@ handlers! {
     ///
     /// OSC 52 clipboard read requests (\"?\") are always ignored and never
     /// forwarded to this callback.
+    ///
+    /// The returned result is sent to the program for protocols with a write
+    /// acknowledgement (OSC 5522); OSC 52 and OSC 1337 Copy discard it. The
+    /// reply never asks the terminal to remember a permission grant, so
+    /// [`ClipboardWrite`] requests are never pre-granted.
     pub fn on_clipboard_write(
         &mut self,
         tag = CLIPBOARD_WRITE,
         from = GhosttyTerminalClipboardWriteFn(
             write: *const ffi::ClipboardWrite
-        ) -> ffi::ClipboardWriteResult::Type,
+        ),
         to = <'t>ClipboardWriteFn(ClipboardWrite<'t>) -> std::result::Result<(), ClipboardWriteError>,
     ) |term, func| {
-        match func(&term, unsafe { ClipboardWrite::from_raw(write) }) {
-            Ok(_) => ffi::ClipboardWriteResult::SUCCESS,
-            Err(e) => e.into()
-        }
+        let result = match func(&term, unsafe { ClipboardWrite::from_raw(write) }) {
+            Ok(()) => ffi::ClipboardWriteResult::SUCCESS,
+            Err(e) => e.into(),
+        };
+        // SAFETY: `write` is valid for the whole callback, which is the
+        // window in which the C API requires the reply.
+        unsafe { reply_clipboard_write(write, result) };
     }
 
     /// Callback invoked when the running program requests a desktop
@@ -2112,7 +2145,7 @@ mod tests {
     use crate::RenderState;
     use crate::render::CursorVisualStyle;
     use crate::snapshot::Decoder;
-    use crate::style::{PaletteIndex, StyleColor};
+    use crate::style::{PaletteIndex, RgbColor, StyleColor};
     use std::cell::{Cell, RefCell};
     use std::mem::ManuallyDrop;
 
@@ -2152,6 +2185,75 @@ mod tests {
 
         assert_eq!(terminal.cols().expect("columns"), 100);
         assert_eq!(terminal.rows().expect("rows"), 30);
+    }
+
+    /// Render-state colors are read through the render-state data getter.
+    #[test]
+    fn render_state_colors_reflect_terminal_colors() {
+        let fg = RgbColor { r: 1, g: 2, b: 3 };
+        let bg = RgbColor { r: 4, g: 5, b: 6 };
+        let mut terminal = Terminal::new(8, 2).unwrap();
+        terminal
+            .set_default_fg_color(Some(fg))
+            .unwrap()
+            .set_default_bg_color(Some(bg))
+            .unwrap();
+        let mut render_state = RenderState::new().unwrap();
+        let snapshot = render_state.update(&terminal).unwrap();
+        let colors = snapshot.colors().unwrap();
+        assert_eq!(colors.foreground, fg);
+        assert_eq!(colors.background, bg);
+    }
+
+    /// The clipboard write callback's result reaches the program through
+    /// the C reply function: OSC 5522 acknowledges every committed write.
+    #[test]
+    fn clipboard_write_result_is_replied_to_the_program() {
+        let responses = RefCell::new(Vec::<u8>::new());
+        let writes = RefCell::new(Vec::<(String, Vec<u8>)>::new());
+        let deny = Cell::new(false);
+        let mut terminal = Terminal::new(20, 2).unwrap();
+        terminal
+            .on_pty_write(|_, bytes: &[u8]| {
+                responses.borrow_mut().extend_from_slice(bytes);
+            })
+            .unwrap()
+            .on_clipboard_write(|_, write: ClipboardWrite<'_>| {
+                assert_eq!(write.location(), ClipboardLocation::Standard);
+                writes.borrow_mut().extend(
+                    write
+                        .contents()
+                        .map(|content| (content.mime.to_owned(), content.data.to_vec())),
+                );
+                if deny.get() {
+                    Err(ClipboardWriteError::Denied)
+                } else {
+                    Ok(())
+                }
+            })
+            .unwrap();
+
+        // "text/plain" and "Ghostty", base64 encoded.
+        terminal.vt_write(b"\x1b]5522;type=write:id=c1\x1b\\");
+        terminal.vt_write(b"\x1b]5522;type=wdata:mime=dGV4dC9wbGFpbg==;R2hvc3R0eQ==\x1b\\");
+        terminal.vt_write(b"\x1b]5522;type=wdata\x1b\\");
+        assert_eq!(
+            *writes.borrow(),
+            vec![("text/plain".to_owned(), b"Ghostty".to_vec())]
+        );
+        assert_eq!(
+            *responses.borrow(),
+            b"\x1b]5522;type=write:status=DONE:id=c1\x1b\\".to_vec()
+        );
+
+        responses.borrow_mut().clear();
+        deny.set(true);
+        terminal.vt_write(b"\x1b]5522;type=write:id=c2\x1b\\");
+        terminal.vt_write(b"\x1b]5522;type=wdata\x1b\\");
+        assert_eq!(
+            *responses.borrow(),
+            b"\x1b]5522;type=write:status=EPERM:id=c2\x1b\\".to_vec()
+        );
     }
 
     #[test]
@@ -2552,6 +2654,7 @@ mod miri_soundness {
             location: ffi::ClipboardLocation::STANDARD,
             contents: std::ptr::null(),
             contents_len: 0,
+            ..Default::default()
         };
         // SAFETY: `raw` outlives the borrow, matching the callback contract.
         let write = unsafe { ClipboardWrite::from_raw(&raw) };
