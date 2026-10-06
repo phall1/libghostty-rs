@@ -131,10 +131,38 @@ fn shared_build_key(zig: &ZigBuild) -> String {
     key.write(zig.optimize);
     key.write(&zig.cpu);
     key.write(&zig_version());
+    // Two Zig builds can report the same version and still emit different
+    // objects: nixpkgs' 0.16.0 rebuilt with GCC 16 wrote random undefined
+    // section symbols that the release binary does not. Key on the binary
+    // itself, so a different Zig never reuses another's archive.
+    key.write(&zig_identity());
     for name in environment {
         key.write(&env::var(name).unwrap_or_default());
     }
     format!("{}-{:016x}", &GHOSTTY_COMMIT[..12], key.finish())
+}
+
+/// The `zig` on PATH, as its canonical path plus size and modification time.
+fn zig_identity() -> String {
+    let Some(zig) = zig_executable() else {
+        return String::new();
+    };
+    let (len, modified) = std::fs::metadata(&zig)
+        .map(|meta| (meta.len(), meta.modified().ok()))
+        .unwrap_or((0, None));
+    let modified = modified
+        .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+        .map_or(0, |since| since.as_nanos());
+    format!("{} {len} {modified}", zig.display())
+}
+
+/// Resolve `zig` the way `Command::new("zig")` will: the first match on PATH.
+fn zig_executable() -> Option<PathBuf> {
+    let name = if cfg!(windows) { "zig.exe" } else { "zig" };
+    env::split_paths(&env::var_os("PATH")?)
+        .map(|dir| dir.join(name))
+        .find(|candidate| candidate.is_file())
+        .and_then(|zig| std::fs::canonicalize(zig).ok())
 }
 
 fn zig_version() -> String {

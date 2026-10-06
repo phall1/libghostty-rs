@@ -40,6 +40,15 @@ fn build_vendored(link_mode: LinkMode, target: &str) {
         cpu: zig_cpu(),
     };
     let install_prefix = out_dir.join("ghostty-install");
+    // Rebuild when the Zig toolchain itself changes, not only its version
+    // string; Cargo (and caches keyed on build-script inputs) otherwise
+    // reuse an archive the previous binary produced.
+    // PATH decides which Zig runs (a Nix shell swaps store paths); the
+    // binary's own path catches an in-place upgrade.
+    println!("cargo:rerun-if-env-changed=PATH");
+    if let Some(zig) = zig_executable() {
+        println!("cargo:rerun-if-changed={}", zig.display());
+    }
 
     // Locate ghostty source: env override > shared per-user build > fetch
     // into OUT_DIR. An override is a live checkout whose contents can change
