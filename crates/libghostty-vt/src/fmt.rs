@@ -26,8 +26,15 @@ pub struct FormatterOptions<'t, 's> {
     inner: ffi::FormatterTerminalOptions,
     _phan: PhantomData<&'s Selection<'t>>,
 }
+impl Default for FormatterOptions<'_, '_> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl<'t, 's> FormatterOptions<'t, 's> {
     /// Create a new set of options for [creating a terminal formatter](Formatter::new).
+    #[must_use]
     pub fn new() -> Self {
         Self {
             inner: ffi::FormatterTerminalOptions {
@@ -43,16 +50,19 @@ impl<'t, 's> FormatterOptions<'t, 's> {
         }
     }
     /// Specify the output format to emit.
+    #[must_use]
     pub fn with_format(mut self, value: Format) -> Self {
         self.inner.emit = value.into();
         self
     }
     /// Specify whether to unwrap soft-wrapped lines.
+    #[must_use]
     pub fn with_unwrap(mut self, value: bool) -> Self {
         self.inner.unwrap = value;
         self
     }
     /// Specify whether to trim trailing whitespace on non-blank lines.
+    #[must_use]
     pub fn with_trim(mut self, value: bool) -> Self {
         self.inner.trim = value;
         self
@@ -61,39 +71,46 @@ impl<'t, 's> FormatterOptions<'t, 's> {
     ///
     /// If a selection is not given, the formatter defaults to formatting
     /// the entire screen.
+    #[must_use]
     pub fn with_selection(mut self, value: &'s Selection<'t>) -> Self {
-        self.inner.selection = &value.inner;
+        self.inner.selection = &raw const value.inner;
         self
     }
 
     // --- Extra settings --- //
 
     /// Specify whether to emit the palette using OSC 4 sequences.
+    #[must_use]
     pub fn with_palette(mut self, value: bool) -> Self {
         self.inner.extra.palette = value;
         self
     }
     /// Specify terminal modes that differ from their defaults using CSI h/l.
+    #[must_use]
     pub fn with_modes(mut self, value: bool) -> Self {
         self.inner.extra.modes = value;
         self
     }
     /// Specify whether to emit scrolling region state using DECSTBM and DECSLRM sequences.
+    #[must_use]
     pub fn with_scrolling_region(mut self, value: bool) -> Self {
         self.inner.extra.scrolling_region = value;
         self
     }
     /// Specify tabstop positions by clearing all tabs and setting each one.
+    #[must_use]
     pub fn with_tabstops(mut self, value: bool) -> Self {
         self.inner.extra.tabstops = value;
         self
     }
     /// Specify the present working directory using OSC 7.
+    #[must_use]
     pub fn with_pwd(mut self, value: bool) -> Self {
         self.inner.extra.pwd = value;
         self
     }
-    /// Specify keyboard modes such as ModifyOtherKeys.
+    /// Specify keyboard modes such as `ModifyOtherKeys`.
+    #[must_use]
     pub fn with_keyboard(mut self, value: bool) -> Self {
         self.inner.extra.keyboard = value;
         self
@@ -102,31 +119,37 @@ impl<'t, 's> FormatterOptions<'t, 's> {
     // --- Screen settings --- //
 
     /// Specify whether to emit cursor position using CUP (CSI H).
+    #[must_use]
     pub fn with_cursor(mut self, value: bool) -> Self {
         self.inner.extra.screen.cursor = value;
         self
     }
-    /// Emit current SGR style state based on the cursor's active style_id.
+    /// Emit current SGR style state based on the cursor's active `style_id`.
+    #[must_use]
     pub fn with_style(mut self, value: bool) -> Self {
         self.inner.extra.screen.style = value;
         self
     }
     /// Emit current hyperlink state using OSC 8 sequences.
+    #[must_use]
     pub fn with_hyperlink(mut self, value: bool) -> Self {
         self.inner.extra.screen.hyperlink = value;
         self
     }
     /// Emit character protection mode using DECSCA.
+    #[must_use]
     pub fn with_protection(mut self, value: bool) -> Self {
         self.inner.extra.screen.protection = value;
         self
     }
     /// Emit Kitty keyboard protocol state using CSI > u and CSI = sequences.
+    #[must_use]
     pub fn with_kitty_keyboard(mut self, value: bool) -> Self {
         self.inner.extra.screen.kitty_keyboard = value;
         self
     }
     /// Emit character set designations and invocations.
+    #[must_use]
     pub fn with_charsets(mut self, value: bool) -> Self {
         self.inner.extra.screen.charsets = value;
         self
@@ -179,10 +202,43 @@ impl<'t, 'alloc: 'cb, 'cb: 't> Formatter<'t, 'alloc, 'cb> {
         })
     }
 
+    /// Run the formatter and stream output to a writer.
+    ///
+    /// Each call formats the current terminal state and invokes the writer
+    /// synchronously as output becomes available. The writer may be called
+    /// more than once.
+    ///
+    /// If an error occurs, the writer may already contain a partial formatted
+    /// output. The operation cannot be resumed from that partial output. This
+    /// function does not flush or make the writer's destination durable.
+    ///
+    /// The writer runs inside a call into libghostty, so a panic in it aborts
+    /// the process.
+    ///
+    /// # Safety
+    ///
+    /// The writer must not call formatter or terminal APIs using this
+    /// formatter or its terminal. The borrow checker can't rule that out,
+    /// since the formatter only borrows its terminal immutably, and some
+    /// terminal methods that take `&self` still change libghostty state (e.g.
+    /// [`Terminal::track_grid_ref`](crate::Terminal::track_grid_ref)).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::IoError`] if the writer rejects output, and
+    /// [`Error::LimitExceeded`] if output accounting overflows.
+    pub unsafe fn format_write<W: std::io::Write>(&mut self, writer: &mut W) -> Result<()> {
+        let writer = crate::io::to_writer(writer);
+        // SAFETY: The writer outlives this synchronous call, and the caller
+        // promises it doesn't reach this formatter or its terminal.
+        from_result(unsafe { ffi::ghostty_formatter_format(self.inner.as_raw(), writer) })
+    }
+
     /// Run the formatter and return an allocated buffer with the output.
     ///
     /// Each call formats the current terminal state. The buffer is allocated
     /// using the provided allocator (or the default allocator if `None`).
+    /// Empty output returns an empty buffer.
     pub fn format_alloc<'a, 'ctx: 'a>(
         &mut self,
         alloc: Option<&'a Allocator<'ctx>>,
@@ -205,7 +261,9 @@ impl<'t, 'alloc: 'cb, 'cb: 't> Formatter<'t, 'alloc, 'cb> {
         };
         from_result(result)?;
 
-        Ok(unsafe { Bytes::from_alloc_output(bytes, len, alloc) })
+        // SAFETY: On success, libghostty hands over `len` bytes allocated
+        // with `alloc`, or NULL for empty output.
+        Ok(unsafe { Bytes::from_raw_parts(bytes, len, alloc) })
     }
 
     /// Run the formatter and produce output into the caller-provided buffer.
@@ -268,8 +326,156 @@ pub enum Format {
     Html = ffi::FormatterFormat::HTML,
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(miri)))]
 mod tests {
+    use super::*;
+
+    /// A writer that accepts at most one byte per write, counting calls.
+    struct ByteAtATime {
+        bytes: Vec<u8>,
+        writes: usize,
+    }
+
+    impl std::io::Write for ByteAtATime {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.writes += 1;
+            self.bytes.extend_from_slice(&buf[..1]);
+            Ok(1)
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    /// A writer that rejects everything.
+    struct Reject;
+
+    impl std::io::Write for Reject {
+        fn write(&mut self, _: &[u8]) -> std::io::Result<usize> {
+            Err(std::io::Error::other("rejected"))
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    fn format_write<W: std::io::Write>(
+        formatter: &mut Formatter<'_, '_, '_>,
+        writer: &mut W,
+    ) -> Result<()> {
+        // SAFETY: None of the test writers touch the terminal.
+        unsafe { formatter.format_write(writer) }
+    }
+
+    fn format_buf(formatter: &mut Formatter<'_, '_, '_>) -> Vec<u8> {
+        let mut buf = vec![0; formatter.format_len().unwrap()];
+        let len = formatter.format_buf(&mut buf).unwrap();
+        buf.truncate(len);
+        buf
+    }
+
+    #[test]
+    fn writer_output_matches_buffer_output_in_every_format() {
+        let mut terminal = Terminal::new(20, 3).unwrap();
+        terminal.vt_write(b"plain \x1b[1;31mbold red\x1b[0m\r\nsecond line");
+        for format in [Format::Plain, Format::Vt, Format::Html] {
+            let options = FormatterOptions::new().with_format(format);
+            let mut formatter = Formatter::new(&terminal, options).unwrap();
+            let expected = format_buf(&mut formatter);
+            assert!(!expected.is_empty(), "{format:?}");
+
+            let mut actual = Vec::new();
+            format_write(&mut formatter, &mut actual).unwrap();
+            assert_eq!(actual, expected, "{format:?}");
+        }
+    }
+
+    #[test]
+    fn partial_writes_are_retried_until_complete() {
+        let mut terminal = Terminal::new(20, 3).unwrap();
+        terminal.vt_write(b"hello\r\nworld");
+        let mut formatter = Formatter::new(&terminal, FormatterOptions::new()).unwrap();
+        let expected = format_buf(&mut formatter);
+
+        let mut writer = ByteAtATime {
+            bytes: Vec::new(),
+            writes: 0,
+        };
+        format_write(&mut formatter, &mut writer).unwrap();
+        assert_eq!(writer.bytes, expected);
+        assert_eq!(writer.writes, expected.len());
+    }
+
+    #[test]
+    fn writer_failure_is_an_io_error() {
+        let mut terminal = Terminal::new(8, 2).unwrap();
+        terminal.vt_write(b"hello");
+        let mut formatter = Formatter::new(&terminal, FormatterOptions::new()).unwrap();
+        assert!(matches!(
+            format_write(&mut formatter, &mut Reject),
+            Err(Error::IoError)
+        ));
+        // The formatter stays usable afterwards.
+        let mut output = Vec::new();
+        format_write(&mut formatter, &mut output).unwrap();
+        assert_eq!(output, b"hello");
+    }
+
+    /// A writer that accepts `chunks` writes, then rejects everything.
+    struct FailAfter {
+        chunks: usize,
+        bytes: Vec<u8>,
+    }
+
+    impl std::io::Write for FailAfter {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            if self.chunks == 0 {
+                return Err(std::io::Error::other("rejected"));
+            }
+            self.chunks -= 1;
+            self.bytes.extend_from_slice(buf);
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn large_output_streams_in_several_writes() {
+        // Far more output than libghostty buffers before handing it over.
+        let mut terminal = Terminal::new(200, 100).unwrap();
+        for i in 0..100 {
+            terminal.vt_write(format!("{i:0>199}\r\n").as_bytes());
+        }
+        let mut formatter = Formatter::new(&terminal, FormatterOptions::new()).unwrap();
+        let expected = format_buf(&mut formatter);
+        assert!(expected.len() > 16 * 1024);
+
+        let mut writer = FailAfter {
+            chunks: usize::MAX,
+            bytes: Vec::new(),
+        };
+        format_write(&mut formatter, &mut writer).unwrap();
+        assert_eq!(writer.bytes, expected);
+        assert!(usize::MAX - writer.chunks > 1, "output came in one write");
+
+        // A writer that fails after the first chunk fails the whole call,
+        // having received only part of the output.
+        let mut writer = FailAfter {
+            chunks: 1,
+            bytes: Vec::new(),
+        };
+        assert!(matches!(
+            format_write(&mut formatter, &mut writer),
+            Err(Error::IoError)
+        ));
+        assert!(!writer.bytes.is_empty() && writer.bytes.len() < expected.len());
+    }
+}
+
+#[cfg(test)]
+mod selection_tests {
     use super::*;
     use crate::{
         selection::Selection,

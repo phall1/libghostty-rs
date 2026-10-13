@@ -4,7 +4,10 @@ on:
   push:
     branches: [master, "release/**"]
   pull_request:
-    branches: [master, "release/**"]
+    # `edited` covers a retargeted base, which happens to every stacked PR
+    # once the one below it merges.
+    types: [opened, synchronize, reopened, edited]
+    branches: [master, "release/**", "stack/ghostty-*"]
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -70,6 +73,11 @@ jobs:
       - name: Check iOS vendored build
         if: runner.os == 'macOS'
         run: nix develop -c cargo check --locked -p libghostty-vt-sys --target aarch64-apple-ios
+
+      # The examples are their own workspace, so the flake checks above never
+      # build them. `--locked` also fails if example/Cargo.lock is stale.
+      - name: Build examples
+        run: nix develop -c cargo build --locked --manifest-path example/Cargo.toml --workspace
 
   miri:
     name: Linux Miri

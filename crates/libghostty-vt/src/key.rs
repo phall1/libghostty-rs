@@ -34,7 +34,10 @@ pub struct Encoder<'alloc>(Object<'alloc, ffi::KeyEncoderImpl>);
 /// [`Encoder::set_options_from_terminal`] resets it to [`OptionAsAlt::False`]
 /// rather than deriving it from terminal state.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-#[allow(clippy::struct_excessive_bools)]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "mirrors the independent terminal mode flags the encoder reads"
+)]
 pub struct EncoderOptions {
     /// DEC mode 1: cursor key application mode.
     pub cursor_key_application: bool,

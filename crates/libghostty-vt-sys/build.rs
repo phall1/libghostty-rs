@@ -4,7 +4,7 @@ use std::process::Command;
 
 /// Pinned ghostty commit. Update this to pull a newer version.
 const GHOSTTY_REPO: &str = "https://github.com/phall1/ghostty.git";
-const GHOSTTY_COMMIT: &str = "29d5e622ea1e39b32ed31afa2f79de6bf20a3e73";
+const GHOSTTY_COMMIT: &str = "ff896fea333f954c8ba1f8932a4871aaf927a5e9";
 
 /// File name of the static archive on Windows. Ghostty installs it under this
 /// name for every Windows ABI so it does not collide with `ghostty-vt.lib`,
