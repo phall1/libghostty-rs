@@ -1870,7 +1870,7 @@ pub mod OscCommandType {
     pub const KITTY_TEXT_SIZING: Type = 22;
     pub const KITTY_CLIPBOARD_PROTOCOL: Type = 23;
     pub const KITTY_DND_PROTOCOL: Type = 24;
-    pub const CONTEXT_SIGNAL: Type = 25;
+    pub const HIERARCHICAL_CONTEXT: Type = 25;
     pub const KITTY_DESKTOP_NOTIFICATION: Type = 26;
     #[doc = " An OSC sequence whose number the parser does not implement. Read it\n with the GHOSTTY_OSC_DATA_UNKNOWN_* data types.\n\n Only produced when GHOSTTY_OSC_OPT_UNKNOWN_MAX_BYTES is nonzero.\n Otherwise these sequences are GHOSTTY_OSC_COMMAND_INVALID."]
     pub const UNKNOWN: Type = 27;
@@ -5403,7 +5403,7 @@ unsafe extern "C" {
     ) -> Result::Type;
 }
 unsafe extern "C" {
-    #[doc = " Check if paste data is safe to paste into the terminal.\n\n Data is considered unsafe if it contains:\n - Newlines (`\\n`) which can inject commands\n - The bracketed paste end sequence (`\\x1b[201~`) which can be used\n   to exit bracketed paste mode and inject commands\n\n This check is conservative and considers data unsafe regardless of\n current terminal state. ghostty_terminal_paste() applies the\n terminal-state-aware rule itself (newlines are safe inside a\n bracketed paste); use this to apply the stricter rule on top.\n"]
+    #[doc = " Check if paste data is safe to paste into the terminal.\n\n Data is considered unsafe if it contains:\n - Line terminators (`\\n` or `\\r`) which can inject commands. A\n   carriage return is what the Enter key sends, so it is as dangerous\n   as a newline on an unbracketed paste.\n - The bracketed paste end sequence (`\\x1b[201~`) which can be used\n   to exit bracketed paste mode and inject commands\n\n This check is conservative and considers data unsafe regardless of\n current terminal state. ghostty_terminal_paste() applies the\n terminal-state-aware rule itself (line terminators are safe inside a\n bracketed paste); use this to apply the stricter rule on top.\n"]
     pub fn ghostty_paste_is_safe(data: *const ::std::os::raw::c_char, len: usize) -> bool;
 }
 unsafe extern "C" {
