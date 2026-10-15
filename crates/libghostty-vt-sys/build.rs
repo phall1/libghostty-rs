@@ -89,6 +89,7 @@ fn main() {
     println!("cargo:rerun-if-env-changed=LIBGHOSTTY_VT_SYS_CPU");
     println!("cargo:rerun-if-env-changed=LIBGHOSTTY_VT_SYS_OPTIMIZE");
     println!("cargo:rerun-if-env-changed=GHOSTTY_SOURCE_DIR");
+    println!("cargo:rerun-if-env-changed=LIBGHOSTTY_VT_SYS_LIB_DIR");
     println!("cargo:rerun-if-env-changed=GHOSTTY_ZIG_SYSTEM_DIR");
     println!("cargo:rerun-if-env-changed=TARGET");
     println!("cargo:rerun-if-env-changed=HOST");
@@ -104,6 +105,7 @@ fn main() {
         "fetch_ghostty.rs",
         "link_emit.rs",
         "optimize.rs",
+        "prebuilt.rs",
         "shared_build.rs",
         "xcframework.rs",
     ] {
@@ -115,6 +117,18 @@ fn main() {
     // test against.
     if env::var_os("GHOSTTY_SOURCE_DIR").is_some() {
         build_vendored(link_mode, &target);
+        return;
+    }
+
+    // A prebuilt library skips Zig entirely. It yields to GHOSTTY_SOURCE_DIR
+    // so a shell that exports a prebuilt directory can still test a local
+    // Ghostty checkout.
+    if let Some(dir) = env::var_os("LIBGHOSTTY_VT_SYS_LIB_DIR") {
+        assert!(
+            !dir.is_empty(),
+            "LIBGHOSTTY_VT_SYS_LIB_DIR must not be empty when set"
+        );
+        link_prebuilt(link_mode, &target, Path::new(&dir));
         return;
     }
 
@@ -132,6 +146,7 @@ fn main() {
 include!("build_vendored.rs");
 include!("link_emit.rs");
 include!("optimize.rs");
+include!("prebuilt.rs");
 include!("fetch_ghostty.rs");
 include!("xcframework.rs");
 include!("copy_dir.rs");

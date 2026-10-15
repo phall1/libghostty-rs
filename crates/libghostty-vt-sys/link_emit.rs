@@ -1,3 +1,39 @@
+/// Panic unless one of `search_dirs` holds the library `link_mode` links.
+fn assert_has_library(link_mode: LinkMode, target: &str, search_dirs: &[PathBuf]) {
+    let has_requested_library = search_dirs.iter().any(|dir| {
+        std::fs::read_dir(dir)
+            .unwrap_or_else(|error| panic!("failed to read {}: {error}", dir.display()))
+            .any(|entry| {
+                let entry = entry.unwrap_or_else(|error| {
+                    panic!("failed to read entry from {}: {error}", dir.display())
+                });
+                let file_name = entry.file_name();
+                let Some(file_name) = file_name.to_str() else {
+                    return false;
+                };
+
+                link_mode.matches_library(target, file_name)
+            })
+    });
+    assert!(
+        has_requested_library,
+        "expected libghostty-vt {} in one of {:?}",
+        link_mode.artifact_kind(),
+        search_dirs
+    );
+}
+
+/// Emit the search paths and the link directive for `link_mode`.
+fn emit_link_directives(link_mode: LinkMode, target: &str, search_dirs: &[PathBuf]) {
+    for dir in search_dirs {
+        println!("cargo:rustc-link-search=native={}", dir.display());
+    }
+    match link_mode {
+        LinkMode::Dynamic => println!("cargo:rustc-link-lib=dylib=ghostty-vt"),
+        LinkMode::Static => emit_static_link_lib(target),
+    }
+}
+
 /// Emit the link directive for the static archive.
 ///
 /// Zig names static archives `<name>.lib` on every Windows ABI, so neither

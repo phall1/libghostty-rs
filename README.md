@@ -59,6 +59,18 @@ checkout instead. Package managers that need network-free builds can also set
 to `zig build --system` so Zig does not download package dependencies during
 the Cargo build script.
 
+Set `LIBGHOSTTY_VT_SYS_LIB_DIR` to a directory holding an already built
+`libghostty-vt.a` (or the shared library with `link-dynamic`) to skip Zig and
+the Ghostty fetch entirely; Zig is then not needed on PATH. This is meant for
+package managers and CI that build the C library once, for example as a cached
+Nix derivation, and reuse it across Cargo builds. The build script links the
+directory as given, so it must hold the Ghostty commit pinned in `build.rs`
+built for the Cargo target, and the optimize and CPU settings below do not
+apply to it. Headers are optional because the bindings are checked in; when
+`<dir>/../include/ghostty/vt.h` exists it is exported as the crate's include
+metadata. `GHOSTTY_SOURCE_DIR` takes precedence over it, and it takes
+precedence over the `pkg-config` path.
+
 Vendored builds derive Zig's optimize mode from Cargo's profile: dev builds use
 `Debug`, size-optimized builds use `ReleaseSmall`, and other release builds use
 `ReleaseFast`. Set `LIBGHOSTTY_VT_SYS_OPTIMIZE` to `Debug`, `ReleaseSafe`,
