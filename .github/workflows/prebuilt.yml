@@ -1,0 +1,149 @@
+# Builds the prebuilt libghostty-vt archives libghostty-vt-sys downloads, and
+# publishes them as a release.
+#
+# Each archive is the pinned Ghostty commit built with the optimize mode and
+# CPU in crates/libghostty-vt-sys/download.rs (.github/scripts/build-prebuilt.sh
+# has the flags). The release tag names that commit and flavor, so a release
+# is published once per Ghostty pin and never replaced: the build script
+# verifies every download against the SHA-256 table in download.rs.
+#
+# Bumping the pin: land the new GHOSTTY_COMMIT, run this workflow from master
+# (Actions > prebuilt > Run workflow), then paste the table from the release
+# notes into PREBUILT_ARCHIVES. Pull requests that touch the build run it
+# without publishing.
+name: prebuilt
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - .github/scripts/build-prebuilt.sh
+      - .github/workflows/prebuilt.yml
+      - crates/libghostty-vt-sys/build.rs
+      - crates/libghostty-vt-sys/download.rs
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  build:
+    name: ${{ matrix.target }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            runner: ubuntu-24.04
+          - target: aarch64-unknown-linux-gnu
+            runner: ubuntu-24.04-arm
+          - target: aarch64-apple-darwin
+            runner: macos-15
+          - target: x86_64-apple-darwin
+            runner: macos-15-intel
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Install Zig
+        uses: mlugg/setup-zig@v2
+        with:
+          version: 0.16.0
+          use-cache: false
+
+      - name: Build libghostty-vt
+        run: .github/scripts/build-prebuilt.sh "${{ matrix.target }}" "$RUNNER_TEMP/prebuilt"
+
+      - name: Check the macOS deployment floor
+        if: runner.os == 'macOS'
+        run: |
+          set -euo pipefail
+          floors="$(otool -l "$RUNNER_TEMP/prebuilt/lib/libghostty-vt.a" | awk '/minos/ { print $2 }' | sort -u)"
+          echo "minos: $floors"
+          test "$floors" = "13.0"
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      # Links the archive the way a download does and runs the safe wrapper's
+      # tests against it.
+      - name: Test against the archive
+        env:
+          LIBGHOSTTY_VT_SYS_LIB_DIR: ${{ runner.temp }}/prebuilt/lib
+        run: cargo test --locked --release -p libghostty-vt
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: prebuilt-${{ matrix.target }}
+          path: ${{ runner.temp }}/prebuilt
+          if-no-files-found: error
+
+  release:
+    name: release
+    needs: build
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: ${{ runner.temp }}/artifacts
+
+      - name: Package and publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ARTIFACTS: ${{ runner.temp }}/artifacts
+        run: |
+          set -euo pipefail
+          sys=crates/libghostty-vt-sys
+          const() { sed -n "s/^const $1: &str = \"\\(.*\\)\";\$/\\1/p" "$sys/$2"; }
+          commit="$(const GHOSTTY_COMMIT build.rs)"
+          optimize="$(const PREBUILT_OPTIMIZE download.rs)"
+          cpu="$(const PREBUILT_CPU download.rs)"
+          tag="ghostty-vt-${commit:0:12}-${optimize,,}-${cpu}"
+          if gh release view "$tag" -R "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "release $tag already exists; releases are never replaced" >&2
+            exit 1
+          fi
+
+          dist="$RUNNER_TEMP/dist"
+          mkdir -p "$dist"
+          for dir in "$ARTIFACTS"/prebuilt-*; do
+            target="${dir##*/prebuilt-}"
+            tar --sort=name --mtime=@0 --owner=0 --group=0 --numeric-owner \
+              -C "$dir" -cf - BUILDINFO include lib | gzip -n -9 >"$dist/libghostty-vt-$target.tar.gz"
+          done
+          (cd "$dist" && sha256sum libghostty-vt-*.tar.gz >SHA256SUMS)
+          cat "$dist/SHA256SUMS"
+
+          {
+            echo "libghostty-vt built from Ghostty \`$commit\` with \`-Doptimize=$optimize -Dcpu=$cpu\`."
+            echo
+            echo "\`PREBUILT_ARCHIVES\` for \`crates/libghostty-vt-sys/download.rs\`:"
+            echo
+            echo '```rust'
+            echo 'const PREBUILT_ARCHIVES: &[(&str, &str)] = &['
+            while read -r sum file; do
+              target="${file#libghostty-vt-}"
+              echo "    (\"${target%.tar.gz}\", \"$sum\"),"
+            done <"$dist/SHA256SUMS"
+            echo '];'
+            echo '```'
+          } >"$RUNNER_TEMP/notes.md"
+
+          gh release create "$tag" -R "$GITHUB_REPOSITORY" \
+            --target "$GITHUB_SHA" \
+            --title "$tag" \
+            --notes-file "$RUNNER_TEMP/notes.md" \
+            "$dist"/libghostty-vt-*.tar.gz "$dist/SHA256SUMS"

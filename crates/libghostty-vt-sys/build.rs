@@ -95,6 +95,7 @@ fn main() {
     println!("cargo:rerun-if-env-changed=HOST");
     println!("cargo:rerun-if-env-changed=DEBUG");
     println!("cargo:rerun-if-env-changed=OPT_LEVEL");
+    println!("cargo:rerun-if-env-changed=DOCS_RS");
     // Paths are relative to this package. Naming any path replaces Cargo's
     // default of watching the whole package, so list every file the build
     // script compiles in.
@@ -102,6 +103,7 @@ fn main() {
         "build.rs",
         "build_vendored.rs",
         "copy_dir.rs",
+        "download.rs",
         "fetch_ghostty.rs",
         "link_emit.rs",
         "optimize.rs",
@@ -140,10 +142,17 @@ fn main() {
         return;
     }
 
+    // With nothing configured, link this fork's published archive of the
+    // pinned commit when one matches the requested flavor.
+    if try_download_prebuilt(link_mode, &target) {
+        return;
+    }
+
     build_vendored(link_mode, &target);
 }
 
 include!("build_vendored.rs");
+include!("download.rs");
 include!("link_emit.rs");
 include!("optimize.rs");
 include!("prebuilt.rs");

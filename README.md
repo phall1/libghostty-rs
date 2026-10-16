@@ -51,8 +51,37 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 ## Building
 
-Requires [Zig](https://ziglang.org/) 0.16.x on PATH. By default, the ghostty
-source is fetched automatically at build time from the pinned commit in
+### Prebuilt archives
+
+A build with none of the variables below set first tries to download a prebuilt
+`libghostty-vt.a` of the pinned Ghostty commit from this fork's GitHub
+Releases, so it needs neither Zig nor a Ghostty checkout. The build script uses
+it only when one is published for the requested flavor:
+
+- the Cargo target is `x86_64-unknown-linux-gnu`, `aarch64-unknown-linux-gnu`,
+  `aarch64-apple-darwin`, or `x86_64-apple-darwin`;
+- the link is static (no `link-dynamic`);
+- the Zig optimize mode resolves to `ReleaseFast` and the CPU to `baseline`
+  (see below). Release builds get this by default; dev builds use `Debug`, so a
+  project that wants the download in dev builds sets
+  `LIBGHOSTTY_VT_SYS_OPTIMIZE = "ReleaseFast"` in its `.cargo/config.toml`
+  `[env]`.
+
+The download shells out to `curl` and `tar`, and the archive is checked against
+the SHA-256 recorded in `crates/libghostty-vt-sys/download.rs` before it is
+unpacked into `OUT_DIR`. A checksum mismatch fails the build. Any other
+failure (no network, no `curl`) prints a warning and builds from source, as
+does `CARGO_NET_OFFLINE=true`. Cargo does not tell build scripts about
+`--offline`, so set the variable for an offline build. Set
+`LIBGHOSTTY_VT_SYS_FROM_SOURCE=1` to skip the download, or
+`LIBGHOSTTY_VT_SYS_PREBUILT_URL` to fetch from a mirror of the release
+downloads (`<url>/<tag>/libghostty-vt-<target>.tar.gz`). The archives are
+built by `.github/workflows/prebuilt.yml`.
+
+### Building from source
+
+Building from source requires [Zig](https://ziglang.org/) 0.16.x on PATH. The
+ghostty source is fetched automatically at build time from the pinned commit in
 `build.rs`. Set `GHOSTTY_SOURCE_DIR` to make the build use a local Ghostty
 checkout instead. Package managers that need network-free builds can also set
 `GHOSTTY_ZIG_SYSTEM_DIR` to a pre-fetched Zig package directory; this is passed

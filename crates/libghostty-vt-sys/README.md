@@ -2,7 +2,13 @@
 
 Raw FFI bindings for libghostty-vt.
 
-- Fetches and builds `libghostty-vt.a` from ghostty sources via Zig by default.
+- Downloads a prebuilt, SHA-256-verified `libghostty-vt.a` from this fork's
+  GitHub Releases when one is published for the target and flavor (static,
+  `ReleaseFast`, `baseline` CPU), and otherwise fetches and builds it from
+  ghostty sources via Zig. `LIBGHOSTTY_VT_SYS_FROM_SOURCE=1` or
+  `CARGO_NET_OFFLINE=true` skips the download, and
+  `LIBGHOSTTY_VT_SYS_PREBUILT_URL` names a mirror of the release downloads.
+  See the repository README.
 - Exposes checked-in generated bindings in `src/bindings.rs`.
 - Static linking is the baseline rather than a Cargo feature. Enable the
   additive `link-dynamic` feature to link the shared library instead.
