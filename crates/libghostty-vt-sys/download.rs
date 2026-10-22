@@ -24,19 +24,19 @@ const PREBUILT_CPU: &str = "baseline";
 const PREBUILT_ARCHIVES: &[(&str, &str)] = &[
     (
         "aarch64-apple-darwin",
-        "f415b0c0a173595db3eb15309464519ba36c7fbc4f27e3ea46d9356b9a70fd71",
+        "2914a1693141804cd3cc0bcf2ce19dccc48537fd3d61a45b2f3570043918198a",
     ),
     (
         "aarch64-unknown-linux-gnu",
-        "dcb9a3c50adecaaf20bf7b59d13d8764ee4c58f6d3a9a0d4107fb34f7a3cbd5e",
+        "c065e33c71d357666bfea3b6aa867292b6ef325dd4d1e51a72edecec157e4dd3",
     ),
     (
         "x86_64-apple-darwin",
-        "2df971624be0be5eba683c31dbcc434ce5b8f69c36c3c27a0b039167a24c5f49",
+        "774187d851d0023fff52c9dce1ccdceeeb0a628f8bb214bd6c1300265569dbf1",
     ),
     (
         "x86_64-unknown-linux-gnu",
-        "356ad90adcda00cbff9c05d576e845c497b3d202f42c457a24180978360a2590",
+        "2037c32673bcb0c764db7b265763ee2a0f7cc6c554b6df57a996fbefbfd5559b",
     ),
 ];
 
