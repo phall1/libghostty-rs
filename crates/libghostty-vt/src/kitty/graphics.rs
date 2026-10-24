@@ -368,6 +368,50 @@ impl<'t> Graphics<'t> {
         })
     }
 
+    /// Read all resident image IDs, including images with no placements.
+    ///
+    /// Reuses `ids`' allocation and replaces its contents with IDs in ascending
+    /// order. An error leaves `ids` empty.
+    pub fn image_ids_into(&self, ids: &mut Vec<u32>) -> Result<()> {
+        ids.clear();
+        loop {
+            let capacity = ids.capacity();
+            let mut count = 0;
+            // SAFETY: The allocation has room for `capacity` u32 values.
+            // The C API initializes exactly `count` entries only on success,
+            // and neither retains the pointer nor mutates terminal storage.
+            let result = unsafe {
+                ffi::ghostty_kitty_graphics_image_ids(
+                    self.inner.as_raw(),
+                    if capacity == 0 {
+                        std::ptr::null_mut()
+                    } else {
+                        ids.as_mut_ptr()
+                    },
+                    capacity,
+                    &raw mut count,
+                )
+            };
+            if result == ffi::Result::OUT_OF_SPACE {
+                if count <= capacity {
+                    return Err(Error::InvalidValue);
+                }
+                ids.try_reserve_exact(count)
+                    .map_err(|_| Error::OutOfMemory)?;
+                continue;
+            }
+            from_result(result)?;
+            if count > capacity {
+                return Err(Error::InvalidValue);
+            }
+            // SAFETY: Success initialized `count` entries, bounded by the
+            // allocation above. No entries are exposed on a failed call.
+            unsafe { ids.set_len(count) };
+            ids.sort_unstable();
+            return Ok(());
+        }
+    }
+
     /// Generation stamp of the last content mutation to this storage.
     ///
     /// Content mutations are any image transmit or replace, placement add, or

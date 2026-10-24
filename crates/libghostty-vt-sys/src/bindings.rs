@@ -2178,6 +2178,15 @@ unsafe extern "C" {
     ) -> Result::Type;
 }
 unsafe extern "C" {
+    #[doc = " Copy the IDs of all stored Kitty graphics images, including images without\n placements. The order is unspecified.\n\n This function does not allocate. On GHOSTTY_OUT_OF_SPACE, no IDs are written\n and out_len receives the required capacity. Pass NULL and zero capacity to\n query that count; an empty storage returns GHOSTTY_SUCCESS. The terminal must\n not be mutated between the size query and the copy.\n\n Returns GHOSTTY_NO_VALUE when Kitty graphics are disabled at build time,\n with out_len set to zero.\n\n small, or GHOSTTY_INVALID_VALUE if ids is NULL with sufficient nonzero capacity\n"]
+    pub fn ghostty_kitty_graphics_image_ids(
+        graphics: KittyGraphics,
+        ids: *mut u32,
+        capacity: usize,
+        out_len: *mut usize,
+    ) -> Result::Type;
+}
+unsafe extern "C" {
     #[doc = " Look up a Kitty graphics image by its image ID.\n\n Returns NULL if no image with the given ID exists or if Kitty graphics\n are disabled at build time.\n\n"]
     pub fn ghostty_kitty_graphics_image(
         graphics: KittyGraphics,
