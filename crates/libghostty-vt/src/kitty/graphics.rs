@@ -804,6 +804,14 @@ impl<'t> PlacementIteration<'t, '_> {
     pub fn is_virtual(&self) -> Result<bool> {
         self.get(ffi::KittyGraphicsPlacementData::IS_VIRTUAL)
     }
+    /// Whether a Unicode placeholder without a placement ID selects this placement.
+    pub fn is_placeholder_default(&self) -> Result<bool> {
+        self.get(ffi::KittyGraphicsPlacementData::IS_PLACEHOLDER_DEFAULT)
+    }
+    /// Whether this placement's ID was supplied by the client rather than assigned internally.
+    pub fn is_external(&self) -> Result<bool> {
+        self.get(ffi::KittyGraphicsPlacementData::IS_EXTERNAL)
+    }
     /// Pixel offset from the left edge of the cell.
     pub fn x_offset(&self) -> Result<u32> {
         self.get(ffi::KittyGraphicsPlacementData::X_OFFSET)

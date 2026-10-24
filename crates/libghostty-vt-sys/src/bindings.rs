@@ -2046,7 +2046,11 @@ pub mod KittyGraphicsPlacementData {
     pub const ROWS: Type = 11;
     #[doc = " Z-index for this placement.\n\n Output type: int32_t *"]
     pub const Z: Type = 12;
-    #[doc = " Z-index for this placement.\n\n Output type: int32_t *"]
+    #[doc = " Whether an unspecified Unicode placeholder placement ID selects this\n placement. Output type: bool."]
+    pub const IS_PLACEHOLDER_DEFAULT: Type = 13;
+    #[doc = " Whether the placement ID is client-specified rather than internal.\n Output type: bool."]
+    pub const IS_EXTERNAL: Type = 14;
+    #[doc = " Whether the placement ID is client-specified rather than internal.\n Output type: bool."]
     pub const MAX_VALUE: Type = 2147483647;
 }
 pub mod KittyPlacementLayer {
