@@ -9,6 +9,8 @@ Raw FFI bindings for libghostty-vt.
   `CARGO_NET_OFFLINE=true` skips the download, and
   `LIBGHOSTTY_VT_SYS_PREBUILT_URL` names a mirror of the release downloads.
   See the repository README.
+- Set `ZIG` to an executable path or command name, without arguments, to override
+  the default `zig` executable resolved through PATH.
 - Exposes checked-in generated bindings in `src/bindings.rs`.
 - Static linking is the baseline rather than a Cargo feature. Enable the
   additive `link-dynamic` feature to link the shared library instead.

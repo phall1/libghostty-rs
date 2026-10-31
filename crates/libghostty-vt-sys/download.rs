@@ -21,24 +21,7 @@ const PREBUILT_CPU: &str = "baseline";
 
 /// `(Rust target, SHA-256 of its archive)` for every archive in the release
 /// of `GHOSTTY_COMMIT`. The release workflow prints this table.
-const PREBUILT_ARCHIVES: &[(&str, &str)] = &[
-    (
-        "aarch64-apple-darwin",
-        "2914a1693141804cd3cc0bcf2ce19dccc48537fd3d61a45b2f3570043918198a",
-    ),
-    (
-        "aarch64-unknown-linux-gnu",
-        "c065e33c71d357666bfea3b6aa867292b6ef325dd4d1e51a72edecec157e4dd3",
-    ),
-    (
-        "x86_64-apple-darwin",
-        "774187d851d0023fff52c9dce1ccdceeeb0a628f8bb214bd6c1300265569dbf1",
-    ),
-    (
-        "x86_64-unknown-linux-gnu",
-        "2037c32673bcb0c764db7b265763ee2a0f7cc6c554b6df57a996fbefbfd5559b",
-    ),
-];
+const PREBUILT_ARCHIVES: &[(&str, &str)] = &[];
 
 /// The release tag: the Ghostty commit and the build flavor.
 fn prebuilt_tag() -> String {

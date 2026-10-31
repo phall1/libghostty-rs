@@ -1,6 +1,6 @@
 //! Types and functions around terminal state management.
 
-use std::{io::Write, marker::PhantomData, mem::MaybeUninit, ptr::NonNull};
+use std::{io::Write, marker::PhantomData, mem::MaybeUninit, num::NonZeroU16, ptr::NonNull};
 
 use crate::{
     alloc::{Allocator, Bytes, Object},
@@ -9,7 +9,7 @@ use crate::{
         from_optional_result_with_len, from_result, from_result_with_len,
     },
     ffi::{self, TerminalData as Data, TerminalOption as Opt},
-    key, mouse,
+    key, mouse, osc,
     screen::{GridRef, Screen, TrackedGridRef},
     style::{self, Palette, RawPalette, RgbColor},
 };
@@ -409,6 +409,9 @@ impl<'alloc: 'cb, 'cb> Terminal<'alloc, 'cb> {
     }
 
     /// Scroll the terminal viewport.
+    ///
+    /// Scrolls the terminal's viewport according to the given behavior.
+    /// See [`ScrollViewport::DeltaPrompt`] for the navigation behavior.
     pub fn scroll_viewport(&mut self, scroll: ScrollViewport) {
         unsafe { ffi::ghostty_terminal_scroll_viewport(self.inner.as_raw(), scroll.into()) }
     }
@@ -964,28 +967,135 @@ impl<'alloc: 'cb, 'cb> Terminal<'alloc, 'cb> {
     pub fn vt_processing_error(&self) -> Result<bool> {
         self.get(Data::VT_PROCESSING_ERROR)
     }
-    /// Get the terminal title as set by escape sequences (e.g. OSC 0/2).
+    /// The terminal title as set by escape sequences (e.g. OSC 0/2).
     ///
-    /// Returns a borrowed string, valid until the next mutating terminal call.
-    /// An empty string is returned when no title has been set.
-    pub fn title(&self) -> Result<&str> {
+    /// Returns a borrowed string. It is valid until the next mutating terminal
+    /// call (e.g. [`Terminal::vt_write`]). An empty string is returned when no
+    /// title has been set.
+    ///
+    /// The bytes come from the program and are not guaranteed to be UTF-8.
+    pub fn title(&self) -> Result<&[u8]> {
         let str = self.get::<ffi::String>(Data::TITLE)?;
-        // SAFETY: We trust libghostty to return a valid borrowed string,
-        // while we uphold that no mutation could happen during its lifetime.
-        let str = unsafe { str.to_bytes() };
-        std::str::from_utf8(str).map_err(|_| Error::InvalidValue)
+        // SAFETY: libghostty documents the returned pointer as valid until the
+        // next mutating terminal call. Not every mutating call takes
+        // `&mut self` (`set_selection` doesn't), but libghostty only rewrites
+        // the title and pwd storage when processing input, resetting, or
+        // through the TITLE and PWD options. These bindings expose the first
+        // two only through `&mut self` methods (`vt_write`,
+        // `vt_write_until_ground`, `reset`), and the options only through
+        // `set_title` and `set_pwd`, which take `&mut self` too. No UTF-8 or
+        // NUL-termination is assumed; we only read `len` bytes.
+        Ok(unsafe { str.to_bytes() })
     }
 
-    /// Get the current working directory as set by escape sequences (e.g. OSC 7).
+    /// The terminal's current working directory as set by escape sequences
+    /// (e.g. OSC 7).
     ///
-    /// Returns a borrowed string, valid until the next mutating terminal call.
-    /// An empty string is returned when no pwd has been set.
-    pub fn pwd(&self) -> Result<&str> {
+    /// Returns a borrowed string. It is valid until the next mutating terminal
+    /// call (e.g. [`Terminal::vt_write`]). An empty string is returned when no
+    /// pwd has been set.
+    ///
+    /// The terminal stores whatever bytes the shell emitted, without parsing.
+    /// That means for OSC 7 the value is the raw URI (typically `file://...`);
+    /// for OSC 9/OSC 1337 it is typically a bare path. The bytes are not
+    /// guaranteed to be UTF-8.
+    pub fn pwd(&self) -> Result<&[u8]> {
         let str = self.get::<ffi::String>(Data::PWD)?;
-        // SAFETY: We trust libghostty to return a valid borrowed string,
-        // while we uphold that no mutation could happen during its lifetime.
-        let str = unsafe { str.to_bytes() };
-        std::str::from_utf8(str).map_err(|_| Error::InvalidValue)
+        // SAFETY: Ditto (see `title`): only `&mut self` methods can rewrite
+        // the pwd storage, and only `len` bytes are read.
+        Ok(unsafe { str.to_bytes() })
+    }
+
+    /// Set the terminal title manually.
+    ///
+    /// The string data is copied into the terminal. An empty title clears
+    /// it. Read it back with [`Terminal::title`].
+    ///
+    /// On `Err(Error::OutOfMemory)`, the previous title is left unchanged.
+    ///
+    /// ```
+    /// use libghostty_vt::Terminal;
+    ///
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// let mut terminal = Terminal::new(80, 24)?;
+    ///
+    /// // Most titles are plain strings, which pass straight in.
+    /// terminal.set_title("vim — main.rs")?;
+    /// assert_eq!(terminal.title()?, "vim — main.rs".as_bytes());
+    ///
+    /// // Titles are bytes, not UTF-8 strings: this one is Latin-1.
+    /// terminal.set_title(b"caf\xe9")?;
+    /// assert_eq!(terminal.title()?, b"caf\xe9");
+    ///
+    /// // So the bytes `title` returns can be set again unchanged.
+    /// let mut other = Terminal::new(80, 24)?;
+    /// other.set_title(terminal.title()?)?;
+    /// assert_eq!(other.title()?, b"caf\xe9");
+    ///
+    /// // An empty title clears it.
+    /// terminal.set_title("")?;
+    /// assert!(terminal.title()?.is_empty());
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn set_title(&mut self, title: impl AsRef<[u8]>) -> Result<&mut Self> {
+        // Take `AsRef<[u8]>` rather than `&str`: strings are the common
+        // case, but upstream accepts arbitrary bytes and `title` returns
+        // bytes, so any value read back must be settable again as-is.
+        let title = title.as_ref();
+        // The `From` impl on `ffi::String` only takes `str`, but upstream
+        // accepts arbitrary bytes, so build it from the slice by hand.
+        // Upstream copies the bytes before returning, so the pointer only
+        // has to live for this call. An empty slice may carry a dangling
+        // (non-NULL) pointer; that's fine, since upstream reads `len` bytes
+        // and clears the title for a zero length.
+        let raw = ffi::String {
+            ptr: title.as_ptr(),
+            len: title.len(),
+        };
+        self.set(Opt::TITLE, &raw)?;
+        Ok(self)
+    }
+
+    /// Set the terminal working directory manually.
+    ///
+    /// The string data is copied into the terminal. An empty pwd clears it.
+    /// Read it back with [`Terminal::pwd`].
+    ///
+    /// On `Err(Error::OutOfMemory)`, the previous pwd is left unchanged.
+    ///
+    /// ```
+    /// use libghostty_vt::Terminal;
+    ///
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// let mut terminal = Terminal::new(80, 24)?;
+    ///
+    /// // Most paths are plain strings, which pass straight in.
+    /// terminal.set_pwd("/home/user/src")?;
+    /// assert_eq!(terminal.pwd()?, "/home/user/src".as_bytes());
+    ///
+    /// // The pwd is stored as-is: neither parsed as a URI nor required to be
+    /// // UTF-8.
+    /// terminal.set_pwd(b"/home/caf\xe9")?;
+    /// assert_eq!(terminal.pwd()?, b"/home/caf\xe9");
+    ///
+    /// // An empty pwd clears it.
+    /// terminal.set_pwd("")?;
+    /// assert!(terminal.pwd()?.is_empty());
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn set_pwd(&mut self, pwd: impl AsRef<[u8]>) -> Result<&mut Self> {
+        // Ditto (see `set_title`): `AsRef<[u8]>` so values from `pwd`
+        // round-trip, and upstream copies the bytes, so the slice only has
+        // to outlive this call.
+        let pwd = pwd.as_ref();
+        let raw = ffi::String {
+            ptr: pwd.as_ptr(),
+            len: pwd.len(),
+        };
+        self.set(Opt::PWD, &raw)?;
+        Ok(self)
     }
     /// The total number of rows in the active screen including scrollback.
     pub fn total_rows(&self) -> Result<usize> {
@@ -1107,8 +1217,29 @@ impl<'alloc: 'cb, 'cb> Terminal<'alloc, 'cb> {
     ///
     /// This prevents malicious input from causing unbounded memory allocation.
     /// A `None` value removes all overrides, reverting to the built-in defaults.
+    /// APC sequences no protocol implements are bounded separately, by
+    /// [`set_unknown_max_bytes`](Self::set_unknown_max_bytes).
     pub fn set_apc_max_bytes(&mut self, max: Option<usize>) -> Result<&mut Self> {
         self.set_optional(Opt::APC_MAX_BYTES, max.as_ref())?;
+        Ok(self)
+    }
+
+    /// Set the most bytes of each unsupported sequence to keep and pass to the
+    /// [unknown sequence callback](Self::on_unknown_sequence). The same limit
+    /// applies to APC and OSC sequences.
+    ///
+    /// Zero, the default, turns unsupported sequence reporting off.
+    ///
+    /// A sequence longer than the limit is still reported. Its content holds
+    /// the first bytes up to the limit, and `truncated` is true.
+    ///
+    /// Choose a limit that fits the largest sequence you expect. Unknown OSC
+    /// sequences up to 2048 bytes are kept in a buffer the terminal already
+    /// owns, so limits up to 2048 add no memory allocations for OSC. Larger
+    /// limits allocate memory for each unknown OSC sequence. Unknown APC
+    /// sequences are always kept in allocated memory.
+    pub fn set_unknown_max_bytes(&mut self, max: usize) -> Result<&mut Self> {
+        self.set(Opt::UNKNOWN_MAX_BYTES, &max)?;
         Ok(self)
     }
 
@@ -1175,6 +1306,46 @@ impl<'alloc: 'cb, 'cb> Terminal<'alloc, 'cb> {
     /// Passing `false` disables title reporting.
     pub fn set_title_report_enabled(&mut self, enabled: bool) -> Result<&mut Self> {
         self.set(Opt::TITLE_REPORT, &enabled)?;
+        Ok(self)
+    }
+
+    /// Enable checksum reports in response to DECRQCRA
+    /// (`CSI Pi ; Pg ; Pt ; Pl ; Pb ; Pr * y`).
+    ///
+    /// This is disabled by default because a running program can checksum the
+    /// screen one cell at a time and so read back everything on it, including
+    /// output from other programs. Passing `false` disables checksum
+    /// reporting.
+    ///
+    /// While this is disabled, XTCHECKSUM (`CSI Ps # y`), which changes how
+    /// the checksum is calculated, is ignored as well. See
+    /// [`Self::set_xt_checksum_extension`].
+    pub fn set_xt_checksum_report_enabled(&mut self, enabled: bool) -> Result<&mut Self> {
+        self.set(Opt::XT_CHECKSUM_REPORT, &enabled)?;
+        Ok(self)
+    }
+
+    /// Set how the DECRQCRA checksum is calculated after a reset (RIS or
+    /// DECSTR). This also changes the current calculation.
+    ///
+    /// The value holds the same bits as XTCHECKSUM (`CSI Ps # y`) and xterm's
+    /// `checksumExtension` resource, which a running program can still use to
+    /// change the calculation until the next reset. See
+    /// [`XtChecksumExtension`] for the bits.
+    ///
+    /// [`XtChecksumExtension::empty()`] is the calculation of a real DEC
+    /// terminal. Values above 31, i.e. any bits outside
+    /// [`XtChecksumExtension::all()`] kept by
+    /// [`XtChecksumExtension::from_bits_retain`], return
+    /// `Err(Error::InvalidValue)` and leave both the current and the reset
+    /// calculation unchanged.
+    ///
+    /// Checksums are only reported once enabled with
+    /// [`Self::set_xt_checksum_report_enabled`].
+    pub fn set_xt_checksum_extension(&mut self, ext: XtChecksumExtension) -> Result<&mut Self> {
+        // Upstream treats NULL and 0 the same, so there's no need for an
+        // `Option` here: the empty set already means "the DEC default".
+        self.set(Opt::XT_CHECKSUM_EXTENSION, &ext.bits())?;
         Ok(self)
     }
 }
@@ -1279,6 +1450,7 @@ impl From<ffi::PointCoordinate> for PointCoordinate {
 
 /// Scroll viewport behavior.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum ScrollViewport {
     /// Scroll to the top of the scrollback.
     Top,
@@ -1288,6 +1460,16 @@ pub enum ScrollViewport {
     Delta(isize),
     /// Scroll to an absolute row offset from the top of the scrollback.
     Row(usize),
+    /// Scroll by a number of prompts relative to the viewport top.
+    ///
+    /// Negative values move backward and positive values move forward.
+    /// Requires semantic prompt markers from the shell. Zero or no matching
+    /// prompt is a no-op. If fewer prompts remain than requested, move to
+    /// the last matching prompt, clamped to the active area.
+    ///
+    /// Moving forward through a final prompt continuation can snap to the
+    /// active area even when there is no newer prompt.
+    DeltaPrompt(isize),
 }
 impl From<ScrollViewport> for ffi::TerminalScrollViewport {
     fn from(value: ScrollViewport) -> Self {
@@ -1313,6 +1495,14 @@ impl From<ScrollViewport> for ffi::TerminalScrollViewport {
                 value: {
                     let mut v = ffi::TerminalScrollViewportValue::default();
                     v.row = row;
+                    v
+                },
+            },
+            ScrollViewport::DeltaPrompt(delta_prompt) => Self {
+                tag: ffi::TerminalScrollViewportTag::DELTA_PROMPT,
+                value: {
+                    let mut v = ffi::TerminalScrollViewportValue::default();
+                    v.delta_prompt = delta_prompt;
                     v
                 },
             },
@@ -1599,6 +1789,29 @@ impl From<TertiaryDeviceAttributes> for ffi::DeviceAttributesTertiary {
     }
 }
 
+bitflags::bitflags! {
+    /// How the DECRQCRA checksum is calculated.
+    ///
+    /// These are the same bits as XTCHECKSUM (`CSI Ps # y`) and xterm's
+    /// `checksumExtension` resource. The empty set is the calculation of a
+    /// real DEC terminal.
+    ///
+    /// See [`Terminal::set_xt_checksum_extension`].
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub struct XtChecksumExtension: u8 {
+        /// Don't negate the result.
+        const NO_NEGATE = 1;
+        /// Don't add the video attributes of each cell.
+        const NO_ATTRIBUTES = 2;
+        /// Don't omit blanks.
+        const NO_OMIT_BLANKS = 4;
+        /// Count cells that were never written to as spaces.
+        const UNWRITTEN_AS_SPACES = 8;
+        /// Use full codepoints instead of the DEC 8-bit values.
+        const FULL_CODEPOINTS = 16;
+    }
+}
+
 /// Color scheme reported in response to a CSI ? 996 n query.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(i32)]
@@ -1829,13 +2042,17 @@ impl std::iter::FusedIterator for ClipboardContents<'_> {}
 
 /// One MIME representation in a clipboard write.
 ///
+/// Both strings are borrowed and valid only for the duration of the callback.
 /// The data is binary-safe and has already been decoded from any protocol-level
 /// encoding. A zero-length data string is an explicit empty representation; it
 /// does not clear the clipboard.
 #[derive(Clone, Copy, Debug)]
 pub struct ClipboardContent<'t> {
     /// MIME type of the representation.
-    pub mime: &'t str,
+    ///
+    /// libghostty does not promise the MIME type is UTF-8, so it is exposed as
+    /// raw bytes.
+    pub mime: &'t [u8],
     /// Decoded, binary-safe representation data.
     pub data: &'t [u8],
 }
@@ -1848,11 +2065,9 @@ impl ClipboardContent<'_> {
         // SAFETY: Upheld by caller
         unsafe {
             Self {
-                // Ghostty currently only emits ASCII mime types, but the C
-                // API does not guarantee UTF-8, so validate rather than
-                // trust; fall back to the opaque-bytes mime type.
-                mime: std::str::from_utf8(value.mime.to_bytes())
-                    .unwrap_or("application/octet-stream"),
+                // The C API does not promise UTF-8 for the MIME type, so
+                // hand the bytes over as-is and let callers validate.
+                mime: value.mime.to_bytes(),
                 // The data is binary-safe per the C API (e.g. an image/png
                 // representation), so it must not be exposed as `str`.
                 data: value.data.to_bytes(),
@@ -2134,6 +2349,110 @@ pub enum ClipboardReadError {
     IoError = ffi::ClipboardReadResult::IO_ERROR,
 }
 
+/// An unsupported terminal sequence.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum UnknownSequence<'t> {
+    /// Application Program Command (APC).
+    ///
+    /// The content is borrowed and valid only for the callback duration. It
+    /// contains the bytes between the sequence introducer and terminator, may
+    /// contain arbitrary binary data, and is not null-terminated.
+    #[non_exhaustive]
+    Apc {
+        /// Retained sequence content.
+        content: &'t [u8],
+        /// Whether content was shortened by the byte limit or allocation
+        /// failure.
+        truncated: bool,
+    },
+    /// An OSC sequence whose number libghostty-vt does not implement.
+    ///
+    /// OSC sequences start with `ESC ]`, followed by a number that identifies
+    /// the command, usually a `;`, and then the command's data. The sequence
+    /// ends with either BEL or ESC followed by a backslash. For example, a
+    /// program might write:
+    ///
+    /// ```text
+    /// ESC ] 7400;status=busy BEL
+    /// ```
+    ///
+    /// For that sequence, `content` is `7400;status=busy` and `terminator`
+    /// is [`osc::Terminator::Bel`]. See [`Terminal::on_unknown_sequence`]
+    /// for a complete example.
+    #[non_exhaustive]
+    Osc {
+        /// Everything between `ESC ]` and the terminator, including the number
+        /// at the start. The bytes are not null-terminated and are only valid
+        /// until the callback returns. Copy them if you need them later.
+        content: &'t [u8],
+        /// True if the sequence was longer than
+        /// [`Terminal::set_unknown_max_bytes`], or memory ran out while
+        /// reading it. In that case `content` holds only the beginning of the
+        /// sequence.
+        truncated: bool,
+        /// How the program ended the sequence. If you send a reply, end it the
+        /// same way.
+        terminator: osc::Terminator,
+    },
+}
+
+impl UnknownSequence<'_> {
+    /// Reads a sequence, or gives `None` for a kind or OSC terminator these
+    /// bindings don't know.
+    ///
+    /// This takes a pointer rather than a reference on purpose: upstream
+    /// writes only the active union field, and for a kind without a payload
+    /// it may leave the whole union unwritten. Referencing or copying such a
+    /// union relies on validity rules Rust hasn't settled yet. So we only
+    /// read the tag, and then only the union field the tag says is active.
+    ///
+    /// # Safety
+    ///
+    /// Caller must guarantee that `raw` is valid for reads and properly
+    /// aligned, that its `tag` is initialized, that the union field named by
+    /// `tag` is initialized, and that the content it points to is valid for
+    /// the lifetime `'t`.
+    unsafe fn from_raw<'t>(
+        raw: *const ffi::TerminalUnknownSequence,
+    ) -> Option<UnknownSequence<'t>> {
+        // SAFETY: Upheld by caller. This reads just the tag field through
+        // the raw pointer, without making a reference to the whole struct.
+        match unsafe { (*raw).tag } {
+            ffi::TerminalUnknownSequenceTag::APC => {
+                // SAFETY: Upheld by caller; the tag says `apc` is the active
+                // union field.
+                let apc = unsafe { (*raw).value.apc };
+                Some(UnknownSequence::Apc {
+                    // SAFETY: Upheld by caller; the content is valid for `'t`.
+                    content: unsafe { apc.content.to_bytes() },
+                    truncated: apc.truncated,
+                })
+            }
+            ffi::TerminalUnknownSequenceTag::OSC => {
+                // SAFETY: Upheld by caller; the tag says `osc` is the active
+                // union field.
+                let osc = unsafe { (*raw).value.osc };
+                // A terminator these bindings don't know has no Rust value
+                // either, so skip the sequence (like `osc::Command`, which
+                // reports it as `Invalid`) instead of inventing one.
+                let terminator = osc.terminator.try_into().ok()?;
+                Some(UnknownSequence::Osc {
+                    // SAFETY: Ditto
+                    content: unsafe { osc.content.to_bytes() },
+                    truncated: osc.truncated,
+                    terminator,
+                })
+            }
+            // Upstream asks callbacks to ignore tags they don't handle.
+            // Sequence kinds added upstream later have no Rust value, so they
+            // are skipped rather than misreported; the enum is non-exhaustive
+            // to grow with them.
+            _ => None,
+        }
+    }
+}
+
 /// A request to show a desktop notification.
 #[derive(Debug, Copy, Clone)]
 pub struct DesktopNotification<'t> {
@@ -2229,18 +2548,50 @@ pub enum ProgressState {
 
 /// A program status report (OSC 7501).
 ///
-/// libghostty validates and decodes the report before the callback runs:
-/// every string is UTF-8, `title` and `message` hold no control
-/// characters, and text the program didn't send is empty. The terminal
-/// doesn't store reports; see [`Terminal::on_program_status`] for the
-/// record rules the embedder is expected to follow.
+/// The program status protocol lets a program tell the terminal what it is
+/// doing: idle, working, done, waiting on the user, or failed, and why. It
+/// is meant for long-running work like builds, deploys, and coding agents,
+/// where the user is often looking at something else and wants to know when
+/// the work finishes or needs them. The protocol only describes state. How
+/// to show it, if at all, is up to your application.
+///
+/// The full specification is at
+/// <https://www.superlogical.com/rex/docs/build/program-status>
+///
+/// For example, a program waiting for the user to approve a change sends
+/// this, where ST is the string terminator (ESC \ or BEL):
+///
+/// ```text
+/// ESC ] 7501 ; state=blocked:kind=permission:app=terraform:msg=QXBwbHk/ ST
+/// ```
+///
+/// The callback then receives a report with:
+///
+/// - [`state`](Self::state): [`ProgramStatusState::Blocked`]
+/// - [`kind`](Self::kind): [`ProgramStatusKind::Permission`]
+/// - [`progress`](Self::progress): `None`, because the program didn't send
+///   one, so the work is indeterminate
+/// - [`id`](Self::id): empty, because this is the root record
+/// - [`app`](Self::app): `"terraform"`
+/// - [`title`](Self::title): empty
+/// - [`message`](Self::message): `"Apply?"`, decoded from the base64 in `msg`
+///
+/// Only reports that pass every check in the specification reach the
+/// callback. Text that the program didn't send is an empty string. All
+/// strings are only valid during the callback, so copy any you want to keep.
+/// The lifetime `'t` enforces this: the report cannot escape the
+/// [`Terminal::on_program_status`] callback it was handed to.
 #[derive(Debug, Copy, Clone)]
-pub struct ProgramStatusReport<'t> {
+pub struct ProgramStatus<'t> {
     ptr: *const ffi::TerminalProgramStatus,
     _phan: PhantomData<&'t ()>,
 }
 
-impl<'t> ProgramStatusReport<'t> {
+impl<'t> ProgramStatus<'t> {
+    /// # Safety
+    ///
+    /// Caller must guarantee that `raw` and the strings it points to are
+    /// valid for the lifetime `'t`.
     unsafe fn from_raw(raw: *const ffi::TerminalProgramStatus) -> Self {
         Self {
             ptr: raw,
@@ -2248,126 +2599,130 @@ impl<'t> ProgramStatusReport<'t> {
         }
     }
 
-    /// What the program says it is doing.
+    /// The raw report.
+    ///
+    /// Every field has been present since the struct was introduced, so
+    /// reading them doesn't need to consult `size` (unlike fields added
+    /// later, which go through `sized_field!`).
+    fn raw(self) -> &'t ffi::TerminalProgramStatus {
+        // SAFETY: We trust libghostty to give us a valid underlying ptr,
+        // which lives for the callback duration, i.e. `'t`.
+        unsafe { &*self.ptr }
+    }
+
+    /// What the program is doing.
+    ///
+    /// A state value from a newer libghostty that these bindings don't know
+    /// yet gives [`Error::InvalidValue`].
     pub fn state(self) -> Result<ProgramStatusState> {
-        // SAFETY: The report lives for the callback duration.
-        unsafe { crate::sized_field!(self.ptr, ffi::TerminalProgramStatus, state) }
-            .ok_or(Error::InvalidValue)?
-            .try_into()
-            .map_err(|_| Error::InvalidValue)
+        self.raw().state.try_into().map_err(|_| Error::InvalidValue)
     }
 
-    /// What a blocked program needs from the user, or `None` when it didn't
-    /// say, the state isn't [`ProgramStatusState::Blocked`], or the kind is
-    /// newer than this binding.
-    #[must_use]
-    pub fn kind(self) -> Option<ProgramStatusKind> {
-        // SAFETY: The report lives for the callback duration.
-        unsafe { crate::sized_field!(self.ptr, ffi::TerminalProgramStatus, kind) }
-            .and_then(|kind| ProgramStatusKind::try_from(kind).ok())
+    /// What the program needs from the user. Only set for
+    /// [`ProgramStatusState::Blocked`]. It is [`ProgramStatusKind::None`]
+    /// for other states, when the program didn't say, or when it sent a kind
+    /// this version of libghostty doesn't know.
+    ///
+    /// A kind value from a newer libghostty that these bindings don't know
+    /// yet gives [`Error::InvalidValue`].
+    pub fn kind(self) -> Result<ProgramStatusKind> {
+        self.raw().kind.try_into().map_err(|_| Error::InvalidValue)
     }
 
-    /// Progress from 0 through 100, or `None` when the program sent none.
-    /// Only reported for the working and blocked states.
+    /// How far along the work is, from 0 through 100, or `None` when there
+    /// is no percentage. Only set for [`ProgramStatusState::Working`] and
+    /// [`ProgramStatusState::Blocked`]. For those states, `None` means the
+    /// work is indeterminate: the program is busy but has no percentage to
+    /// report. It is also `None` for other states and when the program sent
+    /// a value outside that range.
     #[must_use]
     pub fn progress(self) -> Option<u8> {
-        // SAFETY: The report lives for the callback duration.
-        unsafe { crate::sized_field!(self.ptr, ffi::TerminalProgramStatus, progress) }
-            .and_then(|progress| u8::try_from(progress).ok())
+        // Upstream uses -1 as the "no percentage" sentinel and otherwise
+        // only ever sends 0 through 100, so every negative value is `None`.
+        u8::try_from(self.raw().progress).ok()
     }
 
-    /// The record this report is about; empty for the root record. A `/`
-    /// separates a child record from its parent.
-    #[must_use]
-    pub fn id(self) -> &'t str {
-        // SAFETY: The report lives for the callback duration.
-        unsafe {
-            Self::text(crate::sized_field!(
-                self.ptr,
-                ffi::TerminalProgramStatus,
-                id
-            ))
-        }
-    }
-
-    /// A stable machine-matchable program name, or empty.
-    #[must_use]
-    pub fn app(self) -> &'t str {
-        // SAFETY: The report lives for the callback duration.
-        unsafe {
-            Self::text(crate::sized_field!(
-                self.ptr,
-                ffi::TerminalProgramStatus,
-                app
-            ))
-        }
-    }
-
-    /// A short label for people, decoded from base64, or empty.
-    #[must_use]
-    pub fn title(self) -> &'t str {
-        // SAFETY: The report lives for the callback duration.
-        unsafe {
-            Self::text(crate::sized_field!(
-                self.ptr,
-                ffi::TerminalProgramStatus,
-                title
-            ))
-        }
-    }
-
-    /// One line of text for people, decoded from base64, or empty.
-    #[must_use]
-    pub fn message(self) -> &'t str {
-        // SAFETY: The report lives for the callback duration.
-        unsafe {
-            Self::text(crate::sized_field!(
-                self.ptr,
-                ffi::TerminalProgramStatus,
-                message
-            ))
-        }
-    }
-
-    /// # Safety
+    /// Which record this report is about. Empty for the root record.
     ///
-    /// `text` must stay valid for `'t`.
-    unsafe fn text(text: Option<ffi::String>) -> &'t str {
-        // libghostty only reports validated UTF-8; anything else is a bug
-        // there, and reads as empty rather than as unchecked text.
-        text.map_or("", |text| {
-            // SAFETY: Upheld by caller.
-            std::str::from_utf8(unsafe { text.to_bytes() }).unwrap_or_default()
-        })
+    /// A program that only reports on itself leaves this empty. A program
+    /// that reports on several things at once gives each its own id, such as
+    /// `"us-east"` and `"eu-west"` for a deploy to two regions. A `/` makes
+    /// one record the child of another, so `"build/test"` is a child of
+    /// `"build"`. The parent record doesn't have to exist.
+    #[must_use]
+    pub fn id(self) -> &'t [u8] {
+        // SAFETY: The report and its strings live for the callback
+        // duration, i.e. `'t`.
+        unsafe { self.raw().id.to_bytes() }
+    }
+
+    /// A stable name for the program that a machine can match on, such as
+    /// `"cargo"`, `"terraform"`, or `"claude-code"`. Use it as a key for
+    /// grouping, filtering, or choosing an icon. It is not a label. The label
+    /// is [`title`](Self::title). Empty when the report didn't include one.
+    /// See [`Terminal::on_program_status`] for how an empty app is filled in
+    /// from a parent record.
+    #[must_use]
+    pub fn app(self) -> &'t [u8] {
+        // SAFETY: Ditto.
+        unsafe { self.raw().app.to_bytes() }
+    }
+
+    /// A short label for the record, meant for people. Programs that report
+    /// several records use this to tell them apart.
+    #[must_use]
+    pub fn title(self) -> &'t [u8] {
+        // SAFETY: Ditto.
+        unsafe { self.raw().title.to_bytes() }
+    }
+
+    /// One line of text for people, saying what the record is doing,
+    /// waiting for, or has finished. You may shorten it to fit, but don't
+    /// try to read meaning into it.
+    #[must_use]
+    pub fn message(self) -> &'t [u8] {
+        // SAFETY: Ditto.
+        unsafe { self.raw().message.to_bytes() }
     }
 }
 
-/// The state in a program status report (OSC 7501).
+/// What a program says it is doing, in a program status report (OSC 7501).
+///
+/// See [`ProgramStatus`] for an overview of the protocol.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, int_enum::IntEnum)]
 #[repr(i32)]
 #[non_exhaustive]
 pub enum ProgramStatusState {
-    /// At rest, waiting for the user's next instruction.
+    /// At rest, waiting for the user's next instruction. For example, an
+    /// interactive tool sitting at its own prompt.
     Idle = ffi::ProgramStatusState::IDLE,
-    /// Running on its own.
+    /// Running on its own. The report may include a progress percentage.
     Working = ffi::ProgramStatusState::WORKING,
-    /// Finished, with a result ready for the user.
+    /// Finished a piece of work, and the result is ready for the user to
+    /// look at.
     Done = ffi::ProgramStatusState::DONE,
     /// Can't continue until the user does something.
+    /// [`kind`](ProgramStatus::kind) says what the program needs and
+    /// [`message`](ProgramStatus::message) says why. The report may include
+    /// a progress percentage.
     Blocked = ffi::ProgramStatusState::BLOCKED,
     /// Failed and stopped.
     Error = ffi::ProgramStatusState::ERROR,
-    /// Not a real state: remove the record with this id and every record
-    /// beneath it, or every record when the id is empty.
+    /// Not a real state. Remove the record with this report's id and every
+    /// record beneath it. If the id is empty, remove every record.
     Clear = ffi::ProgramStatusState::CLEAR,
 }
 
-/// What a blocked program needs from the user (OSC 7501).
+/// What a blocked program needs from the user, in a program status report
+/// (OSC 7501).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, int_enum::IntEnum)]
 #[repr(i32)]
 #[non_exhaustive]
 pub enum ProgramStatusKind {
-    /// Approval to do something.
+    /// The program didn't say, or the state isn't
+    /// [`ProgramStatusState::Blocked`].
+    None = ffi::ProgramStatusKind::NONE,
+    /// Approval to do something, such as "Apply these changes?".
     Permission = ffi::ProgramStatusKind::PERMISSION,
     /// An answer the user has to type.
     Question = ffi::ProgramStatusKind::QUESTION,
@@ -2375,7 +2730,16 @@ pub enum ProgramStatusKind {
     Auth = ffi::ProgramStatusKind::AUTH,
 }
 
-/// A shell integration event (OSC 133).
+/// A shell integration event, passed to the
+/// [`Terminal::on_semantic_prompt`] callback.
+///
+/// [`kind`](Self::kind) says which step of the command this is. The other
+/// fields only carry information for the kinds listed on each field, and are
+/// zero or empty otherwise.
+///
+/// Strings are only valid during the callback. Copy them if you need them
+/// later. The lifetime `'t` enforces this: the event cannot escape the
+/// [`Terminal::on_semantic_prompt`] callback it was handed to.
 #[derive(Debug, Copy, Clone)]
 pub struct SemanticPrompt<'t> {
     ptr: *const ffi::TerminalSemanticPrompt,
@@ -2383,6 +2747,10 @@ pub struct SemanticPrompt<'t> {
 }
 
 impl<'t> SemanticPrompt<'t> {
+    /// # Safety
+    ///
+    /// Caller must guarantee that `raw` and the strings it points to are
+    /// valid for the lifetime `'t`.
     unsafe fn from_raw(raw: *const ffi::TerminalSemanticPrompt) -> Self {
         Self {
             ptr: raw,
@@ -2390,88 +2758,180 @@ impl<'t> SemanticPrompt<'t> {
         }
     }
 
+    /// The raw event.
+    ///
+    /// Upstream promises every field we read has been present since the
+    /// struct was introduced, so reading them doesn't need to consult
+    /// `size`. Fields added later (upstream names a command identifier and
+    /// a "redrawn prompt" flag as likely) must go through `sized_field!`.
+    fn raw(self) -> &'t ffi::TerminalSemanticPrompt {
+        // SAFETY: We trust libghostty to give us a valid underlying ptr,
+        // which lives for the callback duration, i.e. `'t`.
+        unsafe { &*self.ptr }
+    }
+
     /// Which step of the command this event reports.
+    ///
+    /// A kind value from a newer libghostty that these bindings don't know
+    /// yet gives [`Error::InvalidValue`].
     pub fn kind(self) -> Result<SemanticPromptKind> {
-        // SAFETY: The event lives for the callback duration.
-        unsafe { crate::sized_field!(self.ptr, ffi::TerminalSemanticPrompt, kind) }
-            .ok_or(Error::InvalidValue)?
-            .try_into()
-            .map_err(|_| Error::InvalidValue)
+        self.raw().kind.try_into().map_err(|_| Error::InvalidValue)
     }
 
-    /// Which prompt a [`SemanticPromptKind::PromptStart`] starts.
+    /// Which prompt is starting. Set for
+    /// [`SemanticPromptKind::PromptStart`]. Always [`PromptKind::Primary`]
+    /// for other kinds.
+    ///
+    /// A prompt kind value from a newer libghostty that these bindings don't
+    /// know yet gives [`Error::InvalidValue`].
     pub fn prompt_kind(self) -> Result<PromptKind> {
-        // SAFETY: The event lives for the callback duration.
-        unsafe { crate::sized_field!(self.ptr, ffi::TerminalSemanticPrompt, prompt_kind) }
-            .ok_or(Error::InvalidValue)?
+        self.raw()
+            .prompt_kind
             .try_into()
             .map_err(|_| Error::InvalidValue)
     }
 
-    /// The exit code a [`SemanticPromptKind::CommandEnd`] reported, if any.
+    /// The command's exit code, or `None` if the shell didn't report one.
+    /// Only ever `Some` for [`SemanticPromptKind::CommandEnd`].
+    ///
+    /// Exit codes can be negative, for example on Windows.
     #[must_use]
     pub fn exit_code(self) -> Option<i32> {
-        // SAFETY: The event lives for the callback duration.
-        let reported =
-            unsafe { crate::sized_field!(self.ptr, ffi::TerminalSemanticPrompt, has_exit_code) };
-        if reported != Some(true) {
-            return None;
-        }
-        // SAFETY: As above.
-        unsafe { crate::sized_field!(self.ptr, ffi::TerminalSemanticPrompt, exit_code) }
+        // Upstream says to trust `has_exit_code` rather than any special
+        // `exit_code` value (it writes 0 when there is none, which is also a
+        // perfectly good exit code), so that's the only thing we look at.
+        let raw = self.raw();
+        raw.has_exit_code.then_some(raw.exit_code)
     }
 
-    /// The decoded command line of a [`SemanticPromptKind::OutputStart`],
-    /// or empty. These are the program's bytes, not necessarily UTF-8.
+    /// The command line that is about to run, for
+    /// [`SemanticPromptKind::OutputStart`]. The shell sends it encoded, and
+    /// this is the decoded text. Empty if the shell didn't send one or it
+    /// couldn't be decoded.
     #[must_use]
     pub fn command(self) -> &'t [u8] {
-        // SAFETY: The event and its strings live for the callback duration.
-        unsafe {
-            crate::sized_field!(self.ptr, ffi::TerminalSemanticPrompt, command)
-                .map_or(&[], |command| command.to_bytes())
-        }
+        // Upstream decodes the command line but never promises the result
+        // is UTF-8 (percent-encoding can produce any bytes), so hand out
+        // the raw bytes and let callers validate.
+        //
+        // SAFETY: The event and its strings live for the callback
+        // duration, i.e. `'t`.
+        unsafe { self.raw().command.to_bytes() }
     }
 
-    /// What went wrong, for a [`SemanticPromptKind::CommandEnd`] whose shell
-    /// sent it, or empty.
+    /// A description of what went wrong, for
+    /// [`SemanticPromptKind::CommandEnd`] when the shell sent one. Empty
+    /// otherwise. Few shells send this. The [exit code](Self::exit_code) is
+    /// the usual way to tell whether a command failed.
     #[must_use]
     pub fn error(self) -> &'t [u8] {
-        // SAFETY: The event and its strings live for the callback duration.
-        unsafe {
-            crate::sized_field!(self.ptr, ffi::TerminalSemanticPrompt, error)
-                .map_or(&[], |error| error.to_bytes())
-        }
+        // SAFETY: Ditto.
+        unsafe { self.raw().error.to_bytes() }
     }
 }
 
-/// The step of a command a shell integration event reports.
+/// The step of a command that a shell integration event reports.
+///
+/// More kinds may be added in later versions, so ignore any kind you don't
+/// handle.
+// Upstream's `GHOSTTY_SEMANTIC_PROMPT_INVALID` (0) is left out on purpose:
+// it is "never reported" and only exists so a zeroed struct isn't mistaken
+// for a real event. If it ever shows up, `kind()` gives `Err` like any other
+// unknown value.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, int_enum::IntEnum)]
 #[repr(i32)]
 #[non_exhaustive]
 pub enum SemanticPromptKind {
     /// The shell started drawing a prompt.
+    /// [`prompt_kind`](SemanticPrompt::prompt_kind) says which one.
     PromptStart = ffi::SemanticPromptKind::PROMPT_START,
-    /// The prompt is drawn and the user can type.
+    /// The prompt is drawn and the user can start typing a command.
     InputStart = ffi::SemanticPromptKind::INPUT_START,
-    /// The command started running; what follows is its output.
+    /// The user submitted the command and it started running. Anything the
+    /// terminal receives after this is the command's output.
     OutputStart = ffi::SemanticPromptKind::OUTPUT_START,
-    /// The command finished.
+    /// The command finished running.
     CommandEnd = ffi::SemanticPromptKind::COMMAND_END,
 }
 
 /// Which prompt a [`SemanticPromptKind::PromptStart`] event starts.
+///
+/// Most shells only draw a primary prompt. Some also draw a prompt on the
+/// right side of the line, or a prompt at the start of each extra line
+/// when a command spans several lines.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, int_enum::IntEnum)]
 #[repr(i32)]
 #[non_exhaustive]
 pub enum PromptKind {
-    /// The main prompt before each command.
+    /// The main prompt shown before each command. This is used when the
+    /// shell doesn't say which prompt it is drawing.
     Primary = ffi::SemanticPromptPromptKind::PRIMARY,
-    /// A prompt at the right edge of the line.
+    /// A prompt drawn at the right edge of the line, such as zsh's
+    /// RPROMPT.
     Right = ffi::SemanticPromptPromptKind::RIGHT,
-    /// A prompt starting an extra line of a multi-line command.
+    /// A prompt at the start of an extra line of a command that spans
+    /// several lines.
     Continuation = ffi::SemanticPromptPromptKind::CONTINUATION,
     /// Another prompt for an extra line of input, such as bash's PS2.
+    /// Shells differ in whether they report extra lines as continuation or
+    /// secondary prompts, so most applications should treat the two the
+    /// same.
     Secondary = ffi::SemanticPromptPromptKind::SECONDARY,
+}
+
+/// A request from the running program to resize the window.
+///
+/// Passed to [`Terminal::on_resize_window`].
+///
+/// New kinds may be added in later versions. Match with a wildcard arm and
+/// ignore any kind you don't handle.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum ResizeWindow {
+    /// Resize the window's text area to a size in rows and columns
+    /// (CSI 8 ; rows ; columns t).
+    Grid {
+        /// Requested height in rows, or `None` to keep the current height.
+        rows: Option<NonZeroU16>,
+        /// Requested width in columns, or `None` to keep the current width.
+        columns: Option<NonZeroU16>,
+    },
+}
+
+impl ResizeWindow {
+    /// Reads a request, or gives `None` for a kind these bindings don't know.
+    ///
+    /// This takes a pointer rather than the struct by value on purpose: for
+    /// a kind without a payload upstream may leave the whole union
+    /// unwritten, and copying an entirely uninitialized union relies on
+    /// validity rules Rust hasn't settled yet. So we only read the tag, and
+    /// then only the union field the tag says is active.
+    ///
+    /// # Safety
+    ///
+    /// Caller must guarantee that `raw` is valid for reads and properly
+    /// aligned, that its `tag` is initialized, and that the union field named
+    /// by `tag` is initialized.
+    unsafe fn from_raw(raw: *const ffi::TerminalResizeWindow) -> Option<Self> {
+        // SAFETY: Upheld by caller. This reads just the tag field through
+        // the raw pointer, without making a reference to the whole struct.
+        match unsafe { (*raw).tag } {
+            ffi::TerminalResizeWindowTag::GRID => {
+                // SAFETY: Upheld by caller; the tag says `grid` is the
+                // active union field.
+                let ffi::TerminalResizeWindowGrid { rows, columns } = unsafe { (*raw).value.grid };
+                // Upstream uses 0 as "keep the current size", which is
+                // exactly what `None` means here.
+                Some(Self::Grid {
+                    rows: NonZeroU16::new(rows),
+                    columns: NonZeroU16::new(columns),
+                })
+            }
+            // Upstream may add kinds without an ABI break. We can't read
+            // their payload, so there's no Rust value for them.
+            _ => None,
+        }
+    }
 }
 
 //---------------------------------------
@@ -3048,24 +3508,12 @@ handlers! {
         func(term, unsafe { ProgressReport::from_raw(progress) });
     }
 
-    /// Call the given function when the shell reports a step of a command
-    /// (OSC 133 semantic prompts). The terminal has already updated its
-    /// screen; malformed sequences are never reported.
-    pub fn on_semantic_prompt(
-        &mut self,
-        tag = SEMANTIC_PROMPT,
-        from = TerminalSemanticPromptFn(event: *const ffi::TerminalSemanticPrompt),
-        to = <'t>SemanticPromptFn(SemanticPrompt<'t>),
-    ) |term, func| {
-        // SAFETY: The event is only borrowed for the callback duration,
-        // which `SemanticPrompt`'s lifetime enforces.
-        func(term, unsafe { SemanticPrompt::from_raw(event) });
-    }
-
     /// Call the given function after the running program performs a full
     /// reset (RIS, `ESC c`). Program status and progress callbacks for the
-    /// cleared state run before this one. A soft reset (DECSTR) doesn't
-    /// call it.
+    /// cleared state run before this one. The title and working directory
+    /// have also been cleared, without firing their change callbacks.
+    /// A soft reset (DECSTR) doesn't call this, and neither does
+    /// [`Terminal::reset`].
     pub fn on_reset(
         &mut self,
         tag = RESET,
@@ -3075,27 +3523,367 @@ handlers! {
         func(term);
     }
 
-    /// Call the given function for each valid program status report
-    /// (OSC 7501).
+    /// Call the given function when the running program sends a program
+    /// status report via OSC 7501.
     ///
-    /// The terminal doesn't store reports. Keep one record per id: a report
-    /// replaces its record completely, [`ProgramStatusState::Clear`] removes
-    /// the record and every record beneath it (all of them for an empty
-    /// id), and a record without an app takes its nearest ancestor's. A
-    /// full reset arrives as a root clear.
+    /// Called synchronously each time the running program sends a valid
+    /// report. See [`ProgramStatus`] for what a report contains.
     ///
-    /// While this callback is set, the terminal answers the `OSC 7501 ; ?`
-    /// support query through [`Self::on_pty_write`]; without it, the query
-    /// gets no reply and reports are dropped.
+    /// The terminal doesn't store reports, so your application keeps them.
+    /// To follow the specification, keep one record per id. A report with an
+    /// empty id is about the root record, the program itself. The records
+    /// follow these rules:
+    ///
+    /// - A report replaces its record completely. A value the report leaves
+    ///   out is gone from the record afterwards. It doesn't keep its old
+    ///   value.
+    /// - A [`ProgramStatusState::Clear`] report removes the record with its
+    ///   id and every record beneath it, so clearing `"build"` also removes
+    ///   `"build/test"`. A clear report with an empty id removes every
+    ///   record.
+    /// - A record without an app takes it from its nearest ancestor that has
+    ///   one. If the root record has app `"deploy"` and the record
+    ///   `"us-east"` has none, show `"us-east"` with app `"deploy"` too.
+    /// - When a new shell prompt starts ([`SemanticPromptKind::PromptStart`]
+    ///   from the [`Terminal::on_semantic_prompt`] callback) or the program
+    ///   running in the terminal exits, remove `working` and
+    ///   `blocked` records. You may remove `idle` records too. Keep `done`
+    ///   and `error` records until the user has seen them, for example until
+    ///   they next focus the terminal.
+    /// - Keep at most 256 records, and allow at least 64. When a new record
+    ///   would go over your limit, remove the one that was updated longest
+    ///   ago.
+    ///
+    /// A full reset (RIS, `ESC c`) removes every record. When that happens,
+    /// the terminal calls this with a [`ProgramStatusState::Clear`] report
+    /// and an empty id, before calling [`Terminal::on_reset`]. This only
+    /// happens when `ESC c` is processed by [`Terminal::vt_write`].
+    /// [`Terminal::reset`] doesn't call either callback, so clear your
+    /// records yourself after calling it.
+    ///
+    /// [`title`](ProgramStatus::title) and
+    /// [`message`](ProgramStatus::message) are already decoded and contain
+    /// no control characters, but they are still untrusted text from the
+    /// program. Don't treat them as markup. If you show them outside the
+    /// terminal, such as in a tab or a notification, remove invisible
+    /// formatting characters like text direction overrides, and say which
+    /// terminal the text came from so a program can't pretend to be one
+    /// running elsewhere.
+    ///
+    /// Example, where `records` stands in for your application's own
+    /// storage:
+    ///
+    /// ```rust
+    /// use std::cell::RefCell;
+    /// use std::collections::HashMap;
+    /// use libghostty_vt::{Terminal, terminal::ProgramStatusState};
+    ///
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// // One record per id. This one keeps only the state and message.
+    /// let records = RefCell::new(HashMap::<Vec<u8>, (ProgramStatusState, Vec<u8>)>::new());
+    /// # let pty = RefCell::new(Vec::new());
+    ///
+    /// let mut terminal = Terminal::new(80, 24)?;
+    /// // Set a pty write callback too, so programs that check for support
+    /// // get a reply.
+    /// terminal
+    ///     .on_pty_write(|_term, bytes| {
+    ///         // Write `bytes` back to the pty.
+    /// #       pty.borrow_mut().extend_from_slice(bytes);
+    ///     })?
+    ///     .on_program_status(|_term, report| {
+    ///         // A panic in the callback aborts the process, so ignore a
+    ///         // state these bindings don't know instead of unwrapping.
+    ///         let Ok(state) = report.state() else { return };
+    ///         let mut records = records.borrow_mut();
+    ///
+    ///         if state == ProgramStatusState::Clear {
+    ///             // Remove this record and every record beneath it. An empty
+    ///             // id removes every record.
+    ///             let id = report.id();
+    ///             records.retain(|key, _| {
+    ///                 let beneath = key
+    ///                     .strip_prefix(id)
+    ///                     .is_some_and(|rest| rest.is_empty() || rest.starts_with(b"/"));
+    ///                 !(id.is_empty() || beneath)
+    ///             });
+    ///             return;
+    ///         }
+    ///
+    ///         // Replace the whole record. The strings are only valid during
+    ///         // this call, so copy them.
+    ///         records.insert(report.id().to_vec(), (state, report.message().to_vec()));
+    ///     })?;
+    /// # let ids = || {
+    /// #     let mut ids: Vec<_> = records.borrow().keys().cloned().collect();
+    /// #     ids.sort();
+    /// #     ids
+    /// # };
+    ///
+    /// // A root record and a few beneath it. "QnVpbGRpbmc=" is "Building".
+    /// terminal.vt_write(b"\x1b]7501;state=working:app=cargo:msg=QnVpbGRpbmc=\x1b\\");
+    /// terminal.vt_write(b"\x1b]7501;state=working:id=build\x1b\\");
+    /// terminal.vt_write(b"\x1b]7501;state=blocked:kind=question:id=build/test\x1b\\");
+    /// terminal.vt_write(b"\x1b]7501;state=done:id=buildx\x1b\\");
+    /// # assert_eq!(ids(), [&b""[..], b"build", b"build/test", b"buildx"]);
+    /// # assert_eq!(
+    /// #     records.borrow()[&b""[..]],
+    /// #     (ProgramStatusState::Working, b"Building".to_vec()),
+    /// # );
+    ///
+    /// // A report replaces its record completely, so the message is gone.
+    /// terminal.vt_write(b"\x1b]7501;state=done\x1b\\");
+    /// # assert_eq!(records.borrow()[&b""[..]], (ProgramStatusState::Done, Vec::new()));
+    ///
+    /// // Clearing "build" also removes "build/test", but not "buildx".
+    /// terminal.vt_write(b"\x1b]7501;state=clear:id=build\x1b\\");
+    /// # assert_eq!(ids(), [&b""[..], b"buildx"]);
+    ///
+    /// // A program checking for support gets a reply through the pty.
+    /// terminal.vt_write(b"\x1b]7501;?\x1b\\");
+    /// # assert!(pty.borrow().starts_with(b"\x1b]7501;?:states="));
+    ///
+    /// // A full reset removes every record.
+    /// terminal.vt_write(b"\x1bc");
+    /// # assert!(records.borrow().is_empty());
+    /// # Ok(())
+    /// # }
+    /// ```
+    ///
+    /// Programs may ask whether the terminal supports the protocol by
+    /// sending `OSC 7501 ; ?`. While this callback is set, the terminal
+    /// answers through [`Terminal::on_pty_write`] with `?` followed by the
+    /// states and kinds it accepts:
+    ///
+    /// ```text
+    /// program:  ESC ] 7501 ; ? ST
+    /// terminal: ESC ] 7501 ; ?:states=idle,working,done,blocked,error:kinds=permission,question,auth ST
+    /// ```
+    ///
+    /// While this callback is not set, the query gets no reply, so a program
+    /// that asks sees the protocol as unsupported. Asking is optional, so
+    /// programs may send reports anyway. Those are dropped. Set a pty write
+    /// callback too, or programs never see the reply.
     pub fn on_program_status(
         &mut self,
         tag = PROGRAM_STATUS,
-        from = TerminalProgramStatusFn(report: *const ffi::TerminalProgramStatus),
-        to = <'t>ProgramStatusFn(ProgramStatusReport<'t>),
+        from = TerminalProgramStatusFn(
+            report: *const ffi::TerminalProgramStatus
+        ),
+        to = <'t>ProgramStatusFn(ProgramStatus<'t>),
     ) |term, func| {
-        // SAFETY: The report is only borrowed for the callback duration,
-        // which `ProgramStatusReport`'s lifetime enforces.
-        func(term, unsafe { ProgramStatusReport::from_raw(report) });
+        // SAFETY: The report and its strings are only valid during the
+        // callback, which `ProgramStatus`'s lifetime enforces.
+        func(term, unsafe { ProgramStatus::from_raw(report) });
+    }
+
+    /// Call the given function when the shell reports a step of a command:
+    /// a prompt starts, input starts, output starts, or the command ends.
+    ///
+    /// Each command goes through four steps, in this order: the prompt
+    /// starts, input starts, output starts, and the command ends. Then the
+    /// next prompt starts. See [`SemanticPromptKind`].
+    ///
+    /// Shells differ in what they report. Many don't send the command line
+    /// or the exit code, and some skip steps, so handle each event on its
+    /// own instead of expecting a strict order. A shell may also start the
+    /// same prompt more than once, for example when it redraws the prompt
+    /// after a resize, so treat a repeated
+    /// [`SemanticPromptKind::PromptStart`] as harmless.
+    ///
+    /// The terminal has already updated its screen when this is called. A
+    /// sequence the terminal rejects as malformed is never reported.
+    ///
+    /// The event and its strings are only valid during the call.
+    ///
+    /// Example, logging each command's result:
+    ///
+    /// ```rust
+    /// use std::cell::RefCell;
+    /// use libghostty_vt::{Terminal, terminal::SemanticPromptKind};
+    ///
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// let results = RefCell::new(Vec::new());
+    ///
+    /// let mut terminal = Terminal::new(80, 24)?;
+    /// terminal.on_semantic_prompt(|_term, event| {
+    ///     // A panic in the callback aborts the process, so ignore a kind
+    ///     // these bindings don't know instead of unwrapping.
+    ///     if let Ok(SemanticPromptKind::CommandEnd) = event.kind() {
+    ///         // Many shells don't report the exit code, so this may be
+    ///         // `None` even for a command that ran.
+    ///         results.borrow_mut().push(event.exit_code());
+    ///     }
+    /// })?;
+    ///
+    /// // The shell reports a command that exited with 1, then one that
+    /// // didn't say how it went.
+    /// terminal.vt_write(b"\x1b]133;D;1\x07");
+    /// terminal.vt_write(b"\x1b]133;D\x07");
+    /// assert_eq!(*results.borrow(), [Some(1), None]);
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn on_semantic_prompt(
+        &mut self,
+        tag = SEMANTIC_PROMPT,
+        from = TerminalSemanticPromptFn(
+            event: *const ffi::TerminalSemanticPrompt
+        ),
+        to = <'t>SemanticPromptFn(SemanticPrompt<'t>),
+    ) |term, func| {
+        // SAFETY: The event and its strings are only valid during the
+        // callback, which `SemanticPrompt`'s lifetime enforces.
+        func(term, unsafe { SemanticPrompt::from_raw(event) });
+    }
+
+    /// Call the given function when the running program asks to resize the
+    /// window, such as with CSI 8 ; rows ; columns t.
+    ///
+    /// More kinds of requests may be reported in later versions; see
+    /// [`ResizeWindow`]. Requests of a kind these bindings don't know are not
+    /// passed to the closure. The terminal is not resized by this: the embedder
+    /// decides whether to allow the request, and if so resizes its window and
+    /// the terminal (with [`Terminal::resize`]). Letting any program resize
+    /// the window is a nuisance at best, so consider making this opt-in for
+    /// users.
+    ///
+    /// Without this callback, resize requests are ignored.
+    ///
+    /// ```rust
+    /// use std::{cell::Cell, num::NonZeroU16};
+    /// use libghostty_vt::{Terminal, terminal::ResizeWindow};
+    ///
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// let requested = Cell::new(None);
+    ///
+    /// let mut terminal = Terminal::new(80, 24)?;
+    /// terminal.on_resize_window(|_term, request| match request {
+    ///     ResizeWindow::Grid { rows, columns } => requested.set(Some((rows, columns))),
+    ///     // Ignore kinds of requests you don't handle.
+    ///     _ => {}
+    /// })?;
+    ///
+    /// terminal.vt_write(b"\x1b[8;30;100t");
+    /// # assert_eq!(requested.get(), Some((NonZeroU16::new(30), NonZeroU16::new(100))));
+    ///
+    /// // The terminal itself keeps its size. Apply the request yourself
+    /// // (`None` means keep the current size of that dimension).
+    /// # assert_eq!((terminal.cols()?, terminal.rows()?), (80, 24));
+    /// if let Some((rows, columns)) = requested.take() {
+    ///     let rows = rows.map_or(terminal.rows()?, NonZeroU16::get);
+    ///     let cols = columns.map_or(terminal.cols()?, NonZeroU16::get);
+    ///     terminal.resize(cols, rows, 8, 16)?;
+    /// }
+    /// # assert_eq!((terminal.cols()?, terminal.rows()?), (100, 30));
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn on_resize_window(
+        &mut self,
+        tag = RESIZE_WINDOW,
+        from = TerminalResizeWindowFn(request: *const ffi::TerminalResizeWindow),
+        to = ResizeWindowFn(ResizeWindow),
+    ) |term, func| {
+        // SAFETY: We trust libghostty to give us a valid, non-NULL request
+        // that lives for the callback duration, with the tag and its
+        // matching payload written. For a payload-less kind the union may be
+        // left unwritten, which is why `from_raw` checks the tag before
+        // reading anything else, instead of us copying the struct out.
+        let request = unsafe { ResizeWindow::from_raw(request) };
+        // Upstream asks callbacks to ignore tags they don't handle. A tag
+        // these bindings don't know has no Rust value, so the closure isn't
+        // called for it.
+        if let Some(request) = request {
+            func(term, request);
+        }
+    }
+
+    /// Called once for each complete sequence that libghostty-vt does not
+    /// implement. Match on [`UnknownSequence`] first, because more kinds of
+    /// sequences may be reported in later versions.
+    ///
+    /// Sequences of a kind these bindings don't know, and OSC sequences with
+    /// an [`osc::Terminator`] these bindings don't know, are not passed to the
+    /// closure.
+    ///
+    /// These are not reported:
+    ///
+    /// - Sequences the program cancelled partway through with CAN or SUB.
+    /// - Sequences libghostty-vt implements, even when their contents are
+    ///   malformed.
+    /// - Supported protocols that the embedder turned off.
+    ///
+    /// The callback runs during [`Self::vt_write`]. It may write a reply to
+    /// the pty, and that reply stays in order with the terminal's own
+    /// replies. It must not call [`Self::vt_write`] on the same terminal.
+    ///
+    /// Nothing is reported until [`Self::set_unknown_max_bytes`] is also set
+    /// to a nonzero value. Installing the callback by itself keeps no sequence
+    /// data and allocates no sequence-capture buffers.
+    ///
+    /// For OSC, the content is everything between `ESC ]` and the terminator,
+    /// including the number that identifies the sequence. As an example,
+    /// suppose your application invents its own OSC 7400 so that programs can
+    /// report their status. If a program writes `ESC ] 7400;status=busy BEL`,
+    /// the callback receives the content `7400;status=busy` and the
+    /// terminator [`osc::Terminator::Bel`]. Match on the number followed by
+    /// `;`, so that `7400;` does not also match an unrelated `74000;`
+    /// sequence.
+    ///
+    /// Only numbers libghostty-vt does not recognize are reported. A sequence
+    /// that uses a number it does implement, such as OSC 2 for the window
+    /// title, is never reported, even when its contents are malformed.
+    ///
+    /// Use the terminator from the request in your reply, since that is what
+    /// the program expects.
+    ///
+    /// ```rust
+    /// use std::cell::RefCell;
+    /// use libghostty_vt::{Terminal, terminal::UnknownSequence};
+    ///
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// let statuses = RefCell::new(Vec::new());
+    ///
+    /// let mut terminal = Terminal::new(80, 24)?;
+    /// terminal
+    ///     .on_unknown_sequence(|_term, sequence| {
+    ///         let UnknownSequence::Osc { content, truncated, .. } = sequence else {
+    ///             return;
+    ///         };
+    ///         // This protocol needs the whole sequence, so skip cut-off ones.
+    ///         if truncated {
+    ///             return;
+    ///         }
+    ///         // Only handle OSC 7400. Everything else is ignored.
+    ///         if let Some(status) = content.strip_prefix(b"7400;") {
+    ///             // The content is only valid during this call. Copy it if you need it
+    ///             // later.
+    ///             statuses.borrow_mut().push(status.to_vec());
+    ///         }
+    ///     })?
+    ///     // Keep up to 4 KiB of each unknown sequence and report them.
+    ///     .set_unknown_max_bytes(4096)?;
+    ///
+    /// terminal.vt_write(b"\x1b]7400;status=busy\x07");
+    /// assert_eq!(*statuses.borrow(), [b"status=busy".to_vec()]);
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn on_unknown_sequence(
+        &mut self,
+        tag = UNKNOWN_SEQUENCE,
+        from = TerminalUnknownSequenceFn(sequence: *const ffi::TerminalUnknownSequence),
+        to = <'t>UnknownSequenceFn(UnknownSequence<'t>),
+    ) |term, func| {
+        // SAFETY: libghostty passes a valid, aligned sequence for the
+        // callback duration, with the tag and the union field it names
+        // written (`lib.TaggedUnion.cval`). Upstream documents the content
+        // as valid only for the callback duration; the higher-ranked `'t` on
+        // `UnknownSequenceFn` stops the closure from keeping it.
+        if let Some(sequence) = unsafe { UnknownSequence::from_raw(sequence) } {
+            func(term, sequence);
+        }
     }
 }
 
@@ -3262,6 +4050,53 @@ mod tests {
         terminal.vt_write(input);
         drop(terminal);
         (seen.into_inner(), output.into_inner())
+    }
+
+    #[test]
+    fn scroll_viewport_delta_prompt() {
+        // Same transcript as upstream's `scroll_viewport delta_prompt` test:
+        // prompts start on rows 0, 3, 6 and 9 of a 10-row history, and with
+        // 2 visible rows the active area starts at row 8.
+        let mut terminal = Terminal::new(80, 2).expect("terminal should initialize");
+        terminal.vt_write(
+            b"\x1b]133;P;k=i\x07p1\r\n\
+              \x1b]133;B\x07cmd1\r\n\
+              \x1b]133;C\x07out1\r\n\
+              \x1b]133;P;k=i\x07p2\r\n\
+              \x1b]133;B\x07cmd2\r\n\
+              \x1b]133;C\x07out2\r\n\
+              \x1b]133;P;k=i\x07p3\r\n\
+              \x1b]133;B\x07cmd3\r\n\
+              \x1b]133;C\x07out3\r\n\
+              \x1b]133;P;k=i\x07p4",
+        );
+        let mut scroll = |scroll| {
+            terminal.scroll_viewport(scroll);
+            terminal.scrollbar().expect("scrollbar should exist").offset
+        };
+
+        // First, upstream's exact sequence.
+        //
+        // Counting is relative to the viewport top (row 8), so going backward
+        // from the active area lands on p3, then p2. Forward returns to p3.
+        assert_eq!(scroll(ScrollViewport::DeltaPrompt(-1)), 6);
+        assert_eq!(scroll(ScrollViewport::DeltaPrompt(-1)), 3);
+        assert_eq!(scroll(ScrollViewport::DeltaPrompt(1)), 6);
+
+        // Over-asking stops at the last matching prompt: p1 going backward
+        // (from p3, so this walks past p2), and p4 going forward, which lies
+        // in the active area and so is clamped to it. Zero is then a no-op.
+        assert_eq!(scroll(ScrollViewport::DeltaPrompt(isize::MIN)), 0);
+        assert_eq!(scroll(ScrollViewport::DeltaPrompt(isize::MAX)), 8);
+        assert_eq!(scroll(ScrollViewport::DeltaPrompt(0)), 8);
+
+        // Extra steps beyond upstream's test: step back from the active area
+        // to p3, check zero is a no-op away from the active area too, then
+        // over-ask with ordinary counts in both directions.
+        assert_eq!(scroll(ScrollViewport::DeltaPrompt(-1)), 6);
+        assert_eq!(scroll(ScrollViewport::DeltaPrompt(0)), 6);
+        assert_eq!(scroll(ScrollViewport::DeltaPrompt(-100)), 0);
+        assert_eq!(scroll(ScrollViewport::DeltaPrompt(100)), 8);
     }
 
     #[test]
@@ -3498,6 +4333,53 @@ mod tests {
         let (output, written) = run(5);
         assert_eq!(output, b"\x1b]5522;type=write:status=DONE:id=c1\x1b\\");
         assert_eq!(written, [b"Hello".to_vec()]);
+    }
+
+    #[test]
+    fn unknown_sequences_are_reported() {
+        use osc::Terminator::{Bel, St};
+
+        let seen = RefCell::new(Vec::new());
+        let mut terminal = Terminal::new(8, 2).unwrap();
+        terminal
+            .on_unknown_sequence(|_term, sequence| {
+                // Record rather than assert: a panic in a callback aborts the
+                // whole test binary.
+                seen.borrow_mut().push(match sequence {
+                    UnknownSequence::Apc {
+                        content, truncated, ..
+                    } => (content.to_vec(), truncated, None),
+                    UnknownSequence::Osc {
+                        content,
+                        truncated,
+                        terminator,
+                        ..
+                    } => (content.to_vec(), truncated, Some(terminator)),
+                });
+            })
+            .unwrap();
+        // Registration alone leaves reporting disabled.
+        terminal.vt_write(b"\x1b_unknown\x1b\\");
+        terminal.set_unknown_max_bytes(4).unwrap();
+        terminal.vt_write(b"\x1b_unknown\x1b\\");
+        terminal.vt_write(b"\x1b]7400;status=busy\x07");
+        terminal.set_unknown_max_bytes(64).unwrap();
+        terminal.vt_write(b"\x1b_unknown\x1b\\");
+        terminal.vt_write(b"\x1b]7400;status=busy\x1b\\");
+        // Numbers libghostty-vt implements are never reported, even with no
+        // callback for them: OSC 7501 is program status, OSC 2 the title.
+        terminal.vt_write(b"\x1b]7501;state=working\x1b\\");
+        terminal.vt_write(b"\x1b]2;title\x07");
+        drop(terminal);
+        assert_eq!(
+            seen.into_inner(),
+            [
+                (b"unkn".to_vec(), true, None),
+                (b"7400".to_vec(), true, Some(Bel)),
+                (b"unknown".to_vec(), false, None),
+                (b"7400;status=busy".to_vec(), false, Some(St)),
+            ]
+        );
     }
 
     #[test]
@@ -3879,7 +4761,7 @@ mod tests {
     fn title_changed_callback_returns_correct_title() {
         // The callback bound on `on_title_changed` is `'cb`, not `'static`,
         // so the closure can borrow stack locals directly – no Rc needed.
-        let captured_title: RefCell<String> = RefCell::new(String::new());
+        let captured_title: RefCell<Vec<u8>> = RefCell::new(Vec::new());
         let callback_count: Cell<usize> = Cell::new(0);
 
         let mut terminal = Terminal::new(80, 24).expect("terminal should initialize");
@@ -3897,19 +4779,19 @@ mod tests {
         // OSC 2 (set title) should invoke on_title_changed.
         terminal.vt_write(b"\x1b]2;Hello Effects\x1b\\");
         assert_eq!(callback_count.get(), 1);
-        assert_eq!(*captured_title.borrow(), "Hello Effects");
+        assert_eq!(*captured_title.borrow(), b"Hello Effects");
 
         // A second title change should fire the callback again.
         terminal.vt_write(b"\x1b]2;Second Title\x1b\\");
         assert_eq!(callback_count.get(), 2);
-        assert_eq!(*captured_title.borrow(), "Second Title");
+        assert_eq!(*captured_title.borrow(), b"Second Title");
     }
 
     /// Send an OSC 7 current-directory sequence, then verify `term.pwd()`
     /// returns the correct value inside the `on_pwd_changed` callback.
     #[test]
     fn pwd_changed_callback_returns_correct_pwd() {
-        let captured_pwd: RefCell<String> = RefCell::new(String::new());
+        let captured_pwd: RefCell<Vec<u8>> = RefCell::new(Vec::new());
         let callback_count: Cell<usize> = Cell::new(0);
 
         let mut terminal = Terminal::new(80, 24).expect("terminal should initialize");
@@ -3924,11 +4806,17 @@ mod tests {
 
         terminal.vt_write(b"\x1b]7;file://localhost/tmp/project\x1b\\");
         assert_eq!(callback_count.get(), 1);
-        assert_eq!(*captured_pwd.borrow(), "file://localhost/tmp/project");
+        assert_eq!(*captured_pwd.borrow(), b"file://localhost/tmp/project");
 
         terminal.vt_write(b"\x1b]7;file://localhost/tmp/other\x1b\\");
         assert_eq!(callback_count.get(), 2);
-        assert_eq!(*captured_pwd.borrow(), "file://localhost/tmp/other");
+        assert_eq!(*captured_pwd.borrow(), b"file://localhost/tmp/other");
+
+        // libghostty stores the pwd bytes as-is, so non-UTF-8 input must come
+        // back verbatim instead of being rejected.
+        terminal.vt_write(b"\x1b]7;file://localhost/tmp/\xff\x1b\\");
+        assert_eq!(callback_count.get(), 3);
+        assert_eq!(*captured_pwd.borrow(), b"file://localhost/tmp/\xff");
     }
 
     #[test]
@@ -4063,6 +4951,508 @@ mod tests {
                 (b"\xc3\x28".to_vec(), b"ok".to_vec()),
             ]
         );
+    }
+
+    /// What a program status callback observed about one report, copied
+    /// out since the report is only valid during the callback.
+    ///
+    /// `state` and `kind` are `None` when the raw value didn't convert, so
+    /// that shows up as a failed comparison outside the callback.
+    #[derive(Debug, PartialEq, Eq)]
+    struct SeenStatus {
+        state: Option<ProgramStatusState>,
+        kind: Option<ProgramStatusKind>,
+        progress: Option<u8>,
+        id: Vec<u8>,
+        app: Vec<u8>,
+        title: Vec<u8>,
+        message: Vec<u8>,
+    }
+
+    impl SeenStatus {
+        /// A report with only `state` set, as upstream fills in every
+        /// value the program didn't send.
+        fn bare(state: ProgramStatusState) -> Self {
+            Self {
+                state: Some(state),
+                kind: Some(ProgramStatusKind::None),
+                progress: None,
+                id: Vec::new(),
+                app: Vec::new(),
+                title: Vec::new(),
+                message: Vec::new(),
+            }
+        }
+    }
+
+    /// Feed `input` to a terminal with a program status callback, returning
+    /// the reports it saw and what the terminal wrote back to the pty.
+    ///
+    /// Assertions happen outside the callback: a panic inside it would
+    /// abort the whole test binary instead of failing the test.
+    fn program_status(input: &[u8]) -> (Vec<SeenStatus>, Vec<u8>) {
+        let seen = RefCell::new(Vec::new());
+        let output = RefCell::new(Vec::new());
+        let mut terminal = Terminal::new(8, 3).unwrap();
+        terminal
+            .on_pty_write(|_, bytes| output.borrow_mut().extend_from_slice(bytes))
+            .unwrap()
+            .on_program_status(|_, report| {
+                seen.borrow_mut().push(SeenStatus {
+                    state: report.state().ok(),
+                    kind: report.kind().ok(),
+                    progress: report.progress(),
+                    id: report.id().to_vec(),
+                    app: report.app().to_vec(),
+                    title: report.title().to_vec(),
+                    message: report.message().to_vec(),
+                });
+            })
+            .unwrap();
+        terminal.vt_write(input);
+        drop(terminal);
+        (seen.into_inner(), output.into_inner())
+    }
+
+    #[test]
+    fn program_status_delivers_every_field() {
+        // title is "Plan" and msg is "Apply?", both base64.
+        let (seen, output) = program_status(
+            b"\x1b]7501;state=blocked:kind=permission:progress=40:id=a/b\
+              :app=terraform:title=UGxhbg==:msg=QXBwbHk/\x07",
+        );
+        assert_eq!(
+            seen,
+            [SeenStatus {
+                state: Some(ProgramStatusState::Blocked),
+                kind: Some(ProgramStatusKind::Permission),
+                progress: Some(40),
+                id: b"a/b".to_vec(),
+                app: b"terraform".to_vec(),
+                title: b"Plan".to_vec(),
+                message: b"Apply?".to_vec(),
+            }]
+        );
+        assert!(output.is_empty());
+    }
+
+    #[test]
+    fn program_status_leaves_unsent_values_empty() {
+        // The example from the upstream docs: no progress means the work is
+        // indeterminate, and no id means the root record.
+        let (seen, _) = program_status(
+            b"\x1b]7501;state=blocked:kind=permission:app=terraform:msg=QXBwbHk/\x1b\\",
+        );
+        assert_eq!(
+            seen,
+            [SeenStatus {
+                kind: Some(ProgramStatusKind::Permission),
+                app: b"terraform".to_vec(),
+                message: b"Apply?".to_vec(),
+                ..SeenStatus::bare(ProgramStatusState::Blocked)
+            }]
+        );
+
+        let (seen, _) = program_status(b"\x1b]7501;state=done\x1b\\");
+        assert_eq!(seen, [SeenStatus::bare(ProgramStatusState::Done)]);
+    }
+
+    #[test]
+    fn program_status_progress_and_kind_follow_state() {
+        let (seen, _) = program_status(
+            &[
+                // 0 is a real percentage, not "no progress".
+                &b"\x1b]7501;state=working:progress=0\x07"[..],
+                b"\x1b]7501;state=working:progress=100\x07",
+                // Out of range reads as no percentage.
+                b"\x1b]7501;state=working:progress=101\x07",
+                // Progress and kind only count for the states that use them.
+                b"\x1b]7501;state=idle:progress=50:kind=question\x07",
+                b"\x1b]7501;state=blocked:kind=auth\x07",
+                // A kind libghostty doesn't know reads as none.
+                b"\x1b]7501;state=blocked:kind=telepathy\x07",
+            ]
+            .concat(),
+        );
+        assert_eq!(
+            seen,
+            [
+                SeenStatus {
+                    progress: Some(0),
+                    ..SeenStatus::bare(ProgramStatusState::Working)
+                },
+                SeenStatus {
+                    progress: Some(100),
+                    ..SeenStatus::bare(ProgramStatusState::Working)
+                },
+                SeenStatus::bare(ProgramStatusState::Working),
+                SeenStatus::bare(ProgramStatusState::Idle),
+                SeenStatus {
+                    kind: Some(ProgramStatusKind::Auth),
+                    ..SeenStatus::bare(ProgramStatusState::Blocked)
+                },
+                SeenStatus::bare(ProgramStatusState::Blocked),
+            ]
+        );
+    }
+
+    #[test]
+    fn program_status_drops_invalid_reports() {
+        // An unknown state and a bad id each discard the whole report.
+        let (seen, output) =
+            program_status(b"\x1b]7501;state=sleeping\x07\x1b]7501;state=idle:id=a//b\x07");
+        assert!(seen.is_empty());
+        assert!(output.is_empty());
+    }
+
+    #[test]
+    fn program_status_clears_every_record_on_full_reset() {
+        let (seen, _) = program_status(b"\x1b]7501;state=error:id=x\x07\x1bc");
+        assert_eq!(
+            seen,
+            [
+                SeenStatus {
+                    id: b"x".to_vec(),
+                    ..SeenStatus::bare(ProgramStatusState::Error)
+                },
+                SeenStatus::bare(ProgramStatusState::Clear),
+            ]
+        );
+    }
+
+    #[test]
+    fn program_status_is_not_cleared_by_reset() {
+        // Upstream's `ghostty_terminal_reset` only resets the terminal; the
+        // clear report comes from the stream handling `ESC c`.
+        let seen = RefCell::new(Vec::new());
+        let mut terminal = Terminal::new(8, 3).unwrap();
+        terminal
+            .on_program_status(|_, report| {
+                seen.borrow_mut()
+                    .push((report.state().ok(), report.id().to_vec()));
+            })
+            .unwrap();
+
+        terminal.vt_write(b"\x1b]7501;state=error:id=x\x07");
+        assert_eq!(
+            seen.take(),
+            [(Some(ProgramStatusState::Error), b"x".to_vec())]
+        );
+
+        terminal.reset();
+        assert!(seen.borrow().is_empty());
+
+        terminal.vt_write(b"\x1bc");
+        assert_eq!(seen.take(), [(Some(ProgramStatusState::Clear), Vec::new())]);
+    }
+
+    #[test]
+    fn program_status_query_is_answered_only_with_a_callback() {
+        const REPLY: &[u8] =
+            b"\x1b]7501;?:states=idle,working,done,blocked,error:kinds=permission,question,auth";
+
+        // The reply uses the same terminator as the query, and the query
+        // itself is not a report.
+        let (seen, output) = program_status(b"\x1b]7501;?\x1b\\\x1b]7501;?\x07");
+        assert!(seen.is_empty());
+        assert_eq!(output, [REPLY, b"\x1b\\", REPLY, b"\x07"].concat());
+
+        // Without the callback the query goes unanswered, so the program
+        // sees the protocol as unsupported.
+        let output = RefCell::new(Vec::new());
+        let mut terminal = Terminal::new(8, 3).unwrap();
+        terminal
+            .on_pty_write(|_, bytes| output.borrow_mut().extend_from_slice(bytes))
+            .unwrap();
+        terminal.vt_write(b"\x1b]7501;?\x1b\\");
+        drop(terminal);
+        assert!(output.into_inner().is_empty());
+    }
+
+    /// What a semantic prompt callback observed about one event, copied out
+    /// since the event is only valid during the callback.
+    ///
+    /// `kind` and `prompt_kind` are `None` when the raw value didn't
+    /// convert, so that shows up as a failed comparison outside the
+    /// callback.
+    #[derive(Debug, PartialEq, Eq)]
+    struct SeenPrompt {
+        kind: Option<SemanticPromptKind>,
+        prompt_kind: Option<PromptKind>,
+        exit_code: Option<i32>,
+        command: Vec<u8>,
+        error: Vec<u8>,
+    }
+
+    impl SeenPrompt {
+        /// An event with only `kind` set, as upstream leaves every other
+        /// field zero or empty (and `prompt_kind` primary) unless the kind
+        /// carries it.
+        fn bare(kind: SemanticPromptKind) -> Self {
+            Self {
+                kind: Some(kind),
+                prompt_kind: Some(PromptKind::Primary),
+                exit_code: None,
+                command: Vec::new(),
+                error: Vec::new(),
+            }
+        }
+    }
+
+    /// Feed `input` to a terminal with a semantic prompt callback, returning
+    /// the events it saw.
+    ///
+    /// Assertions happen outside the callback: a panic inside it would
+    /// abort the whole test binary instead of failing the test.
+    fn semantic_prompt(input: &[u8]) -> Vec<SeenPrompt> {
+        let seen = RefCell::new(Vec::new());
+        let mut terminal = Terminal::new(8, 3).unwrap();
+        terminal
+            .on_semantic_prompt(|_, event| {
+                seen.borrow_mut().push(SeenPrompt {
+                    kind: event.kind().ok(),
+                    prompt_kind: event.prompt_kind().ok(),
+                    exit_code: event.exit_code(),
+                    command: event.command().to_vec(),
+                    error: event.error().to_vec(),
+                });
+            })
+            .unwrap();
+        terminal.vt_write(input);
+        drop(terminal);
+        seen.into_inner()
+    }
+
+    #[test]
+    fn semantic_prompt_reports_each_command_step() {
+        // Mirrors upstream's "set semantic_prompt callback" test in
+        // src/terminal/c/terminal.zig, plus a few cases from the stream
+        // handler test: OSC 133 A/P/N start a prompt (P's `k=` picks right,
+        // continuation or secondary, and an unknown kind falls back to
+        // primary), B/I start input, C starts output with a percent-encoded
+        // `cmdline_url`, and D ends the command with an optional exit code
+        // and `err=`.
+        let seen = semantic_prompt(
+            b"\x1b]133;A\x07\
+              \x1b]133;P;k=r\x07\
+              \x1b]133;P;k=c\x07\
+              \x1b]133;P;k=s\x07\
+              \x1b]133;P;k=x\x07\
+              \x1b]133;N\x07\
+              \x1b]133;B\x07\
+              \x1b]133;I\x07\
+              \x1b]133;C;cmdline_url=ls%20-la\x07\
+              \x1b]133;D;0\x07\
+              \x1b]133;D;-1;err=boom\x07\
+              \x1b]133;D\x07",
+        );
+        assert_eq!(
+            seen,
+            [
+                SeenPrompt::bare(SemanticPromptKind::PromptStart),
+                SeenPrompt {
+                    prompt_kind: Some(PromptKind::Right),
+                    ..SeenPrompt::bare(SemanticPromptKind::PromptStart)
+                },
+                SeenPrompt {
+                    prompt_kind: Some(PromptKind::Continuation),
+                    ..SeenPrompt::bare(SemanticPromptKind::PromptStart)
+                },
+                SeenPrompt {
+                    prompt_kind: Some(PromptKind::Secondary),
+                    ..SeenPrompt::bare(SemanticPromptKind::PromptStart)
+                },
+                SeenPrompt::bare(SemanticPromptKind::PromptStart),
+                SeenPrompt::bare(SemanticPromptKind::PromptStart),
+                SeenPrompt::bare(SemanticPromptKind::InputStart),
+                SeenPrompt::bare(SemanticPromptKind::InputStart),
+                SeenPrompt {
+                    command: b"ls -la".to_vec(),
+                    ..SeenPrompt::bare(SemanticPromptKind::OutputStart)
+                },
+                // 0 is a real exit code, distinct from "not reported".
+                SeenPrompt {
+                    exit_code: Some(0),
+                    ..SeenPrompt::bare(SemanticPromptKind::CommandEnd)
+                },
+                SeenPrompt {
+                    exit_code: Some(-1),
+                    error: b"boom".to_vec(),
+                    ..SeenPrompt::bare(SemanticPromptKind::CommandEnd)
+                },
+                SeenPrompt::bare(SemanticPromptKind::CommandEnd),
+            ]
+        );
+    }
+
+    #[test]
+    fn semantic_prompt_command_is_raw_bytes() {
+        // Percent-decoding can produce any bytes, and upstream makes no
+        // UTF-8 promise, so non-UTF-8 command lines come through untouched.
+        // An undecodable command line and a fresh line alone (OSC 133 L,
+        // layout rather than a command step) are covered too.
+        let seen = semantic_prompt(
+            b"\x1b]133;C;cmdline_url=%ff%fe\x07\
+              \x1b]133;C;cmdline='bad\x07\
+              \x1b]133;L\x07",
+        );
+        assert_eq!(
+            seen,
+            [
+                SeenPrompt {
+                    command: b"\xff\xfe".to_vec(),
+                    ..SeenPrompt::bare(SemanticPromptKind::OutputStart)
+                },
+                SeenPrompt::bare(SemanticPromptKind::OutputStart),
+            ]
+        );
+    }
+
+    /// Feed `input` to an 80x24 terminal with a resize window callback,
+    /// returning the requests it saw and the terminal's size afterwards as
+    /// `(cols, rows)`.
+    ///
+    /// Assertions happen outside the callback: a panic inside it would
+    /// abort the whole test binary instead of failing the test.
+    fn resize_window(input: &[u8]) -> (Vec<ResizeWindow>, (u16, u16)) {
+        let seen = RefCell::new(Vec::new());
+        let mut terminal = Terminal::new(80, 24).unwrap();
+        terminal
+            .on_resize_window(|_, request| seen.borrow_mut().push(request))
+            .unwrap();
+        terminal.vt_write(input);
+        let size = (terminal.cols().unwrap(), terminal.rows().unwrap());
+        drop(terminal);
+        (seen.into_inner(), size)
+    }
+
+    #[test]
+    fn resize_window_delivers_rows_then_columns() {
+        let (seen, size) = resize_window(b"\x1b[8;30;100t");
+        // Asymmetric values catch a swapped rows/columns mapping.
+        assert_eq!(
+            seen,
+            [ResizeWindow::Grid {
+                rows: NonZeroU16::new(30),
+                columns: NonZeroU16::new(100),
+            }]
+        );
+        // The request alone doesn't resize the terminal.
+        assert_eq!(size, (80, 24));
+    }
+
+    #[test]
+    fn resize_window_reports_omitted_and_zero_params_as_none() {
+        // Upstream can't tell an explicit 0 from an omitted parameter, and
+        // both mean "keep the current size" for that dimension.
+        let (seen, size) = resize_window(b"\x1b[8;;120t\x1b[8;30t\x1b[8t\x1b[8;0;0t");
+        assert_eq!(
+            seen,
+            [
+                ResizeWindow::Grid {
+                    rows: None,
+                    columns: NonZeroU16::new(120),
+                },
+                ResizeWindow::Grid {
+                    rows: NonZeroU16::new(30),
+                    columns: None,
+                },
+                ResizeWindow::Grid {
+                    rows: None,
+                    columns: None,
+                },
+                ResizeWindow::Grid {
+                    rows: None,
+                    columns: None,
+                },
+            ]
+        );
+        assert_eq!(size, (80, 24));
+    }
+
+    #[test]
+    fn resize_window_from_raw_skips_unknown_tags() {
+        let mut raw = ffi::TerminalResizeWindow {
+            tag: ffi::TerminalResizeWindowTag::GRID,
+            ..Default::default()
+        };
+        raw.value.grid = ffi::TerminalResizeWindowGrid {
+            rows: 30,
+            columns: 100,
+        };
+        assert_eq!(
+            // SAFETY: `raw` is a live local with the tag and `grid` written.
+            unsafe { ResizeWindow::from_raw(&raw const raw) },
+            Some(ResizeWindow::Grid {
+                rows: NonZeroU16::new(30),
+                columns: NonZeroU16::new(100),
+            })
+        );
+
+        // A kind added upstream later has no Rust value. That the trampoline
+        // then skips the closure is checked by the miri mock in
+        // `miri_soundness::resize_window_skips_unknown_tags`.
+        raw.tag = ffi::TerminalResizeWindowTag::GRID + 1;
+        // SAFETY: Ditto; an unknown tag makes `from_raw` read nothing else.
+        assert_eq!(unsafe { ResizeWindow::from_raw(&raw const raw) }, None);
+    }
+
+    #[test]
+    fn unknown_sequence_from_raw_skips_unknown_tags_and_terminators() {
+        let apc_bytes = *b"Gf=100";
+        let osc_bytes = *b"7400;status=busy";
+        let mut raw = ffi::TerminalUnknownSequence {
+            tag: ffi::TerminalUnknownSequenceTag::APC,
+            ..Default::default()
+        };
+        raw.value.apc = ffi::TerminalUnknownStringSequence {
+            truncated: true,
+            content: ffi::String {
+                ptr: apc_bytes.as_ptr(),
+                len: apc_bytes.len(),
+            },
+        };
+        assert_eq!(
+            // SAFETY: `raw` is a live local with the tag and `apc` written,
+            // and its content points into `apc_bytes`, which outlives it.
+            unsafe { UnknownSequence::from_raw(&raw const raw) },
+            Some(UnknownSequence::Apc {
+                content: b"Gf=100",
+                truncated: true,
+            })
+        );
+
+        raw.tag = ffi::TerminalUnknownSequenceTag::OSC;
+        raw.value.osc = ffi::TerminalUnknownOscSequence {
+            truncated: false,
+            content: ffi::String {
+                ptr: osc_bytes.as_ptr(),
+                len: osc_bytes.len(),
+            },
+            terminator: ffi::OscTerminator::ST,
+        };
+        assert_eq!(
+            // SAFETY: Ditto, with `osc` written and pointing into `osc_bytes`.
+            unsafe { UnknownSequence::from_raw(&raw const raw) },
+            Some(UnknownSequence::Osc {
+                content: b"7400;status=busy",
+                truncated: false,
+                terminator: osc::Terminator::St,
+            })
+        );
+
+        // A terminator added upstream later has no Rust value, so the
+        // sequence is skipped rather than given an invented one.
+        raw.value.osc.terminator = ffi::OscTerminator::BEL + 1;
+        // SAFETY: Ditto
+        assert_eq!(unsafe { UnknownSequence::from_raw(&raw const raw) }, None);
+
+        // A kind added upstream later has no Rust value either. That the
+        // trampoline then skips the closure is checked by the miri mock in
+        // `miri_soundness::unknown_sequence_skips_unknown_tags_and_terminators`.
+        raw.tag = ffi::TerminalUnknownSequenceTag::OSC + 1;
+        // SAFETY: Ditto; an unknown tag makes `from_raw` read nothing else.
+        assert_eq!(unsafe { UnknownSequence::from_raw(&raw const raw) }, None);
     }
 
     fn tiny_terminal() -> Terminal<'static, 'static> {
@@ -4275,6 +5665,193 @@ mod tests {
         assert!(!read.can_remember());
         read.reply(Ok(&[]), &[], false);
     }
+
+    /// Bold `A`, then `B`, a space and `C` on the first row.
+    ///
+    /// Expected checksums, worked out from upstream's `xt_checksum.compute`:
+    /// bold `A` is 0x41 + 0x80 (bold attribute) = 0xC1, `B` is 0x42 and `C`
+    /// is 0x43. The DEC calculation omits the space because it isn't the
+    /// first cell, so the sum is 0x146, negated to 0xFEBA.
+    const CHECKSUM_SCREEN: &[u8] = b"\x1b[1mA\x1b[0mB C";
+
+    /// DECRQCRA with id 7 over row 1, columns 1 through 4.
+    const DECRQCRA: &[u8] = b"\x1b[7;1;1;1;1;4*y";
+
+    /// Write a DECRQCRA and return whatever the terminal replied.
+    fn request_checksum(terminal: &mut Terminal<'_, '_>, output: &RefCell<Vec<u8>>) -> Vec<u8> {
+        output.borrow_mut().clear();
+        terminal.vt_write(DECRQCRA);
+        output.borrow().clone()
+    }
+
+    #[test]
+    fn xt_checksum_report_requires_opt_in() {
+        let output = RefCell::new(Vec::new());
+        let mut terminal = Terminal::new(80, 24).expect("terminal should initialize");
+        terminal
+            .on_pty_write(|_term, bytes| output.borrow_mut().extend_from_slice(bytes))
+            .expect("callback should register");
+        terminal.vt_write(CHECKSUM_SCREEN);
+
+        // Disabled by default.
+        assert_eq!(request_checksum(&mut terminal, &output), b"");
+
+        terminal
+            .set_xt_checksum_report_enabled(true)
+            .expect("enabling checksum reports should succeed");
+        assert_eq!(
+            request_checksum(&mut terminal, &output),
+            b"\x1bP7!~FEBA\x1b\\"
+        );
+
+        terminal
+            .set_xt_checksum_report_enabled(false)
+            .expect("disabling checksum reports should succeed");
+        assert_eq!(request_checksum(&mut terminal, &output), b"");
+    }
+
+    #[test]
+    fn xt_checksum_xtchecksum_ignored_while_disabled() {
+        let output = RefCell::new(Vec::new());
+        let mut terminal = Terminal::new(80, 24).expect("terminal should initialize");
+        terminal
+            .on_pty_write(|_term, bytes| output.borrow_mut().extend_from_slice(bytes))
+            .expect("callback should register");
+        terminal.vt_write(CHECKSUM_SCREEN);
+
+        // XTCHECKSUM 1 (don't negate) while reporting is off is dropped, so
+        // the reply after enabling is still the negated DEC checksum.
+        terminal.vt_write(b"\x1b[1#y");
+        terminal
+            .set_xt_checksum_report_enabled(true)
+            .expect("enabling checksum reports should succeed");
+        assert_eq!(
+            request_checksum(&mut terminal, &output),
+            b"\x1bP7!~FEBA\x1b\\"
+        );
+
+        // Once enabled, the same XTCHECKSUM takes effect: 0x146 unnegated.
+        terminal.vt_write(b"\x1b[1#y");
+        assert_eq!(
+            request_checksum(&mut terminal, &output),
+            b"\x1bP7!~0146\x1b\\"
+        );
+    }
+
+    #[test]
+    fn xt_checksum_extension_changes_calculation() {
+        let output = RefCell::new(Vec::new());
+        let mut terminal = Terminal::new(80, 24).expect("terminal should initialize");
+        terminal
+            .on_pty_write(|_term, bytes| output.borrow_mut().extend_from_slice(bytes))
+            .expect("callback should register");
+        terminal.vt_write(CHECKSUM_SCREEN);
+        terminal
+            .set_xt_checksum_report_enabled(true)
+            .expect("enabling checksum reports should succeed");
+
+        // Without attributes: 0x41 + 0x42 + 0x43 = 0xC6, negated to 0xFF3A.
+        terminal
+            .set_xt_checksum_extension(XtChecksumExtension::NO_ATTRIBUTES)
+            .expect("valid extension should be accepted");
+        assert_eq!(
+            request_checksum(&mut terminal, &output),
+            b"\x1bP7!~FF3A\x1b\\"
+        );
+
+        // Keeping blanks adds the space: 0x146 + 0x20 = 0x166, negated to
+        // 0xFE9A.
+        terminal
+            .set_xt_checksum_extension(XtChecksumExtension::NO_OMIT_BLANKS)
+            .expect("valid extension should be accepted");
+        assert_eq!(
+            request_checksum(&mut terminal, &output),
+            b"\x1bP7!~FE9A\x1b\\"
+        );
+
+        // The extension also applies after a full reset (RIS), which clears
+        // the screen, so rewrite it.
+        terminal
+            .set_xt_checksum_extension(XtChecksumExtension::NO_NEGATE)
+            .expect("valid extension should be accepted");
+        terminal.vt_write(b"\x1bc");
+        terminal.vt_write(CHECKSUM_SCREEN);
+        assert_eq!(
+            request_checksum(&mut terminal, &output),
+            b"\x1bP7!~0146\x1b\\"
+        );
+
+        // The empty set restores the DEC calculation.
+        terminal
+            .set_xt_checksum_extension(XtChecksumExtension::empty())
+            .expect("empty extension should be accepted");
+        assert_eq!(
+            request_checksum(&mut terminal, &output),
+            b"\x1bP7!~FEBA\x1b\\"
+        );
+
+        // Bits above 31 are rejected and leave the calculation unchanged.
+        let result = terminal.set_xt_checksum_extension(XtChecksumExtension::from_bits_retain(32));
+        assert!(matches!(result, Err(Error::InvalidValue)));
+        assert_eq!(
+            request_checksum(&mut terminal, &output),
+            b"\x1bP7!~FEBA\x1b\\"
+        );
+    }
+
+    #[test]
+    fn xt_checksum_extension_unwritten_and_full_codepoints() {
+        let output = RefCell::new(Vec::new());
+        let mut terminal = Terminal::new(80, 24).expect("terminal should initialize");
+        terminal
+            .on_pty_write(|_term, bytes| output.borrow_mut().extend_from_slice(bytes))
+            .expect("callback should register");
+        terminal
+            .set_xt_checksum_report_enabled(true)
+            .expect("enabling checksum reports should succeed");
+
+        // Row 2: column 1 is U+1D400 MATHEMATICAL BOLD CAPITAL A, written
+        // without attributes.
+        // Row 1: column 1 is never written, column 2 is a bold `X`. Bold is
+        // left on so we'd notice it leaking into the unwritten cell.
+        terminal.vt_write("\x1b[2;1H\u{1D400}\x1b[1;2H\x1b[1mX".as_bytes());
+        let request = |terminal: &mut Terminal<'_, '_>, req: &[u8]| {
+            output.borrow_mut().clear();
+            terminal.vt_write(req);
+            output.borrow().clone()
+        };
+
+        // Row 1, columns 1 through 2. Bold `X` is 0x58 + 0x80 = 0xD8.
+        // DEC: the unwritten cell is skipped entirely, so `X` is the only
+        // cell: 0xD8, negated to 0xFF28.
+        let row1 = b"\x1b[7;1;1;1;1;2*y";
+        terminal
+            .set_xt_checksum_extension(XtChecksumExtension::empty())
+            .expect("valid extension should be accepted");
+        assert_eq!(request(&mut terminal, row1), b"\x1bP7!~FF28\x1b\\");
+        // Unwritten as spaces: the unwritten cell is a space with no style
+        // (bold only applies to cells that get printed) and, being the first
+        // cell, isn't trimmed: 0x20 + 0xD8 = 0xF8, negated to 0xFF08.
+        terminal
+            .set_xt_checksum_extension(XtChecksumExtension::UNWRITTEN_AS_SPACES)
+            .expect("valid extension should be accepted");
+        assert_eq!(request(&mut terminal, row1), b"\x1bP7!~FF08\x1b\\");
+
+        // Row 2, column 1.
+        // DEC: anything outside the 8-bit ranges counts as ESC: 0x1B, negated
+        // to 0xFFE5.
+        let row2 = b"\x1b[7;1;2;1;2;1*y";
+        terminal
+            .set_xt_checksum_extension(XtChecksumExtension::empty())
+            .expect("valid extension should be accepted");
+        assert_eq!(request(&mut terminal, row2), b"\x1bP7!~FFE5\x1b\\");
+        // Full codepoints: 0x1D400 truncated to 16 bits is 0xD400, negated to
+        // 0x2C00.
+        terminal
+            .set_xt_checksum_extension(XtChecksumExtension::FULL_CODEPOINTS)
+            .expect("valid extension should be accepted");
+        assert_eq!(request(&mut terminal, row2), b"\x1bP7!~2C00\x1b\\");
+    }
 }
 
 /// Soundness regression tests for
@@ -4283,7 +5860,8 @@ mod tests {
 /// These tests are gated on `cfg(miri)` because they construct the exact
 /// shapes the C API produces and feed them into the safe wrappers, which was
 /// UB before the wrappers stopped building slices and `&str` from unvalidated
-/// FFI input. Run with:
+/// FFI input. The module also holds tests that need the mock C API to produce
+/// shapes real libghostty can't yet (e.g. unknown upstream tags). Run with:
 ///
 /// ```sh
 /// cargo +nightly miri test -p libghostty-vt miri_soundness
@@ -4299,6 +5877,8 @@ mod miri_soundness {
         userdata: *mut std::ffi::c_void,
         write: ffi::TerminalWritePtyFn,
         read: ffi::TerminalClipboardReadFn,
+        resize: ffi::TerminalResizeWindowFn,
+        unknown: ffi::TerminalUnknownSequenceFn,
     }
 
     #[unsafe(no_mangle)]
@@ -4312,6 +5892,8 @@ mod miri_soundness {
             userdata: std::ptr::null_mut(),
             write: None,
             read: None,
+            resize: None,
+            unknown: None,
         });
         // SAFETY: The constructor supplies a writable out parameter.
         unsafe { *out = Box::into_raw(terminal).cast() };
@@ -4342,6 +5924,14 @@ mod miri_soundness {
                 // SAFETY: The wrapper supplies the matching callback ABI.
                 terminal.read = Some(unsafe { std::mem::transmute(value) });
             }
+            ffi::TerminalOption::RESIZE_WINDOW => {
+                // SAFETY: The wrapper supplies the matching callback ABI.
+                terminal.resize = Some(unsafe { std::mem::transmute(value) });
+            }
+            ffi::TerminalOption::UNKNOWN_SEQUENCE => {
+                // SAFETY: The wrapper supplies the matching callback ABI.
+                terminal.unknown = Some(unsafe { std::mem::transmute(value) });
+            }
             _ => return ffi::Result::INVALID_VALUE,
         }
         ffi::Result::SUCCESS
@@ -4363,14 +5953,93 @@ mod miri_soundness {
         data: *const u8,
         len: usize,
     ) {
-        let (userdata, write, read) = {
+        let (userdata, write, read, resize, unknown) = {
             // SAFETY: The wrapper supplies a live handle. End this borrow
             // before dispatch, since a clipboard reply can dispatch again.
             let mock = unsafe { &*terminal.cast::<MockTerminal>() };
-            (mock.userdata, mock.write, mock.read)
+            (
+                mock.userdata,
+                mock.write,
+                mock.read,
+                mock.resize,
+                mock.unknown,
+            )
         };
         // SAFETY: vt_write supplies initialized bytes for this call.
-        if unsafe { std::slice::from_raw_parts(data, len) } == b"clipboard" {
+        let bytes = unsafe { std::slice::from_raw_parts(data, len) };
+        if let Some(kind) = bytes.strip_prefix(b"resize:") {
+            // The libghostty these bindings build against only sends tags
+            // they know, so a kind added upstream later can only be faked
+            // here. The input picks the tag.
+            let known = kind == b"grid";
+            // Write only the tag and the active field, leaving the rest of the
+            // union (and struct padding) uninitialized, so miri flags any
+            // read of bytes upstream never wrote. An unknown kind has no
+            // field we know, so its whole union stays uninitialized and miri
+            // also flags a grid read before the tag is checked.
+            let mut request = MaybeUninit::<ffi::TerminalResizeWindow>::uninit();
+            let p = request.as_mut_ptr();
+            // SAFETY: `p` points to writable, aligned storage for the struct,
+            // and `&raw mut` makes no reference to the uninitialized memory.
+            // This matches `lib.TaggedUnion.cval`, whose `@unionInit` leaves
+            // the rest of the union undefined.
+            unsafe {
+                if known {
+                    (&raw mut (*p).tag).write(ffi::TerminalResizeWindowTag::GRID);
+                    (&raw mut (*p).value.grid).write(ffi::TerminalResizeWindowGrid {
+                        rows: 30,
+                        columns: 100,
+                    });
+                } else {
+                    (&raw mut (*p).tag).write(ffi::TerminalResizeWindowTag::GRID + 1);
+                }
+            }
+            // SAFETY: Registration provided this callback and its userdata;
+            // the request remains live throughout synchronous dispatch.
+            unsafe { resize.unwrap()(terminal, userdata, p.cast_const()) };
+        } else if let Some(kind) = bytes.strip_prefix(b"unknown:") {
+            // Like `resize:` above, the input picks the shape and only the tag
+            // and the active field are written. `future` is a kind added
+            // upstream later, so its whole union stays uninitialized;
+            // `osc-badterm` is an OSC with a terminator added upstream later.
+            let content = b"payload";
+            let content = ffi::String {
+                ptr: content.as_ptr(),
+                len: content.len(),
+            };
+            let mut sequence = MaybeUninit::<ffi::TerminalUnknownSequence>::uninit();
+            let p = sequence.as_mut_ptr();
+            // SAFETY: As for `resize:` above.
+            unsafe {
+                match kind {
+                    b"apc" => {
+                        (&raw mut (*p).tag).write(ffi::TerminalUnknownSequenceTag::APC);
+                        (&raw mut (*p).value.apc).write(ffi::TerminalUnknownStringSequence {
+                            truncated: true,
+                            content,
+                        });
+                    }
+                    b"osc" | b"osc-badterm" => {
+                        let terminator = if kind == b"osc" {
+                            ffi::OscTerminator::BEL
+                        } else {
+                            ffi::OscTerminator::BEL + 1
+                        };
+                        (&raw mut (*p).tag).write(ffi::TerminalUnknownSequenceTag::OSC);
+                        (&raw mut (*p).value.osc).write(ffi::TerminalUnknownOscSequence {
+                            truncated: false,
+                            content,
+                            terminator,
+                        });
+                    }
+                    _ => (&raw mut (*p).tag).write(ffi::TerminalUnknownSequenceTag::OSC + 1),
+                }
+            }
+            // SAFETY: Registration provided this callback and its userdata;
+            // the sequence and its static content remain live throughout
+            // synchronous dispatch.
+            unsafe { unknown.unwrap()(terminal, userdata, p.cast_const()) };
+        } else if bytes == b"clipboard" {
             let request = ffi::ClipboardRead {
                 ctx: terminal.cast(),
                 reply: Some(reply_to_read),
@@ -4456,6 +6125,71 @@ mod miri_soundness {
         assert_eq!(*order.borrow(), [1, 2, 3]);
     }
 
+    /// Upstream may add resize request kinds without an ABI break, and asks
+    /// callbacks to ignore tags they don't handle. The trampoline must skip
+    /// the closure for such a tag rather than abort (e.g. by `expect`ing the
+    /// conversion inside `extern "C"`), while still delivering known tags.
+    #[test]
+    fn resize_window_skips_unknown_tags() {
+        let seen = std::cell::RefCell::new(Vec::new());
+        let mut terminal = Terminal::new(8, 2).unwrap();
+        terminal
+            .on_resize_window(|_, request| seen.borrow_mut().push(request))
+            .unwrap();
+        // `GRID + 1`, then `GRID` as the positive control.
+        terminal.vt_write(b"resize:unknown");
+        terminal.vt_write(b"resize:grid");
+        drop(terminal);
+        assert_eq!(
+            seen.into_inner(),
+            [ResizeWindow::Grid {
+                rows: NonZeroU16::new(30),
+                columns: NonZeroU16::new(100),
+            }]
+        );
+    }
+
+    /// Upstream may add unknown-sequence kinds and OSC terminators without an
+    /// ABI break, and fills the union with `lib.TaggedUnion.cval`, which
+    /// leaves bytes outside the active field (the whole union, for a kind
+    /// without a payload) undefined. The trampoline must read only the tag
+    /// and then the field it names, and skip the closure for a kind or
+    /// terminator it doesn't know, while still delivering known ones.
+    #[test]
+    fn unknown_sequence_skips_unknown_tags_and_terminators() {
+        let seen = std::cell::RefCell::new(Vec::new());
+        let mut terminal = Terminal::new(8, 2).unwrap();
+        terminal
+            .on_unknown_sequence(|_, sequence| {
+                // Copy the content out; it is only borrowed for the callback.
+                seen.borrow_mut().push(match sequence {
+                    UnknownSequence::Apc { content, truncated } => {
+                        (None, content.to_vec(), truncated)
+                    }
+                    UnknownSequence::Osc {
+                        content,
+                        truncated,
+                        terminator,
+                    } => (Some(terminator), content.to_vec(), truncated),
+                });
+            })
+            .unwrap();
+        // `OSC + 1` and an OSC ending in `BEL + 1`, then APC and OSC as the
+        // positive controls.
+        terminal.vt_write(b"unknown:future");
+        terminal.vt_write(b"unknown:osc-badterm");
+        terminal.vt_write(b"unknown:apc");
+        terminal.vt_write(b"unknown:osc");
+        drop(terminal);
+        assert_eq!(
+            seen.into_inner(),
+            [
+                (None, b"payload".to_vec(), true),
+                (Some(osc::Terminator::Bel), b"payload".to_vec(), false),
+            ]
+        );
+    }
+
     /// The C trampoline declares `contents: ?[*]const ClipboardContent` and
     /// sends `contents = NULL, contents_len = 0` for a write carrying no
     /// representations (e.g. OSC 52 with an empty payload, the documented
@@ -4493,13 +6227,14 @@ mod miri_soundness {
         };
         // SAFETY: `data` outlives the borrow, matching the callback contract.
         let content = unsafe { ClipboardContent::from_raw(&raw) };
-        assert_eq!(content.mime, "text/plain");
+        assert_eq!(content.mime, b"text/plain");
         assert_eq!(content.data, &data);
     }
 
-    /// `mime` stays `&str`, so it must be validated rather than trusted:
-    /// a non-UTF-8 mime string falls back to the opaque-bytes mime type
-    /// instead of producing an invalid `&str`.
+    /// The C API doesn't promise UTF-8 for `mime` either. It used to be
+    /// validated into a `&str`, with non-UTF-8 values replaced by
+    /// `application/octet-stream`; it is raw bytes now, so check a non-UTF-8
+    /// mime string comes back verbatim instead of being substituted.
     #[test]
     fn clipboard_content_with_non_utf8_mime() {
         let mime = [0xFF_u8, 0xFE];
@@ -4517,7 +6252,7 @@ mod miri_soundness {
         // SAFETY: `mime` and `data` outlive the borrow, matching the
         // callback contract.
         let content = unsafe { ClipboardContent::from_raw(&raw) };
-        assert_eq!(content.mime, "application/octet-stream");
+        assert_eq!(content.mime, &mime);
         assert_eq!(content.data, b"hello");
     }
 }
@@ -4533,10 +6268,10 @@ mod shell_integration_tests {
             state: ProgramStatusState,
             kind: Option<ProgramStatusKind>,
             progress: Option<u8>,
-            id: String,
-            app: String,
-            title: String,
-            message: String,
+            id: Vec<u8>,
+            app: Vec<u8>,
+            title: Vec<u8>,
+            message: Vec<u8>,
         },
         Prompt(SemanticPromptKind, Option<i32>),
         Reset,
@@ -4554,7 +6289,7 @@ mod shell_integration_tests {
             .on_program_status(|_, report| {
                 seen.borrow_mut().push(Seen::Status {
                     state: report.state().expect("state"),
-                    kind: report.kind(),
+                    kind: report.kind().ok(),
                     progress: report.progress(),
                     id: report.id().to_owned(),
                     app: report.app().to_owned(),
@@ -4576,33 +6311,6 @@ mod shell_integration_tests {
     }
 
     #[test]
-    fn program_status_reports_are_decoded() {
-        // "Apply?" in base64.
-        let (seen, _) = observe(
-            b"\x1b]7501;state=blocked:kind=permission:progress=42:id=deploy/eu:app=tf:msg=QXBwbHk/\x1b\\",
-        );
-        assert_eq!(
-            seen,
-            [Seen::Status {
-                state: ProgramStatusState::Blocked,
-                kind: Some(ProgramStatusKind::Permission),
-                progress: Some(42),
-                id: "deploy/eu".to_owned(),
-                app: "tf".to_owned(),
-                title: String::new(),
-                message: "Apply?".to_owned(),
-            }]
-        );
-    }
-
-    #[test]
-    fn program_status_query_is_answered_and_invalid_reports_dropped() {
-        let (seen, output) = observe(b"\x1b]7501;?\x07\x1b]7501;state=bogus\x07");
-        assert!(seen.is_empty());
-        assert!(output.starts_with(b"\x1b]7501;?:states="), "{output:?}");
-    }
-
-    #[test]
     fn semantic_prompts_carry_exit_codes_and_reset_clears_status() {
         let (seen, _) = observe(
             b"\x1b]133;A\x07\x1b]133;B\x07\x1b]133;C\x07\x1b]133;D;3\x07\x1b]7501;state=working\x07\x1bc",
@@ -4616,24 +6324,39 @@ mod shell_integration_tests {
                 Seen::Prompt(SemanticPromptKind::CommandEnd, Some(3)),
                 Seen::Status {
                     state: ProgramStatusState::Working,
-                    kind: None,
+                    kind: Some(ProgramStatusKind::None),
                     progress: None,
-                    id: String::new(),
-                    app: String::new(),
-                    title: String::new(),
-                    message: String::new(),
+                    id: Vec::new(),
+                    app: Vec::new(),
+                    title: Vec::new(),
+                    message: Vec::new(),
                 },
                 Seen::Status {
                     state: ProgramStatusState::Clear,
-                    kind: None,
+                    kind: Some(ProgramStatusKind::None),
                     progress: None,
-                    id: String::new(),
-                    app: String::new(),
-                    title: String::new(),
-                    message: String::new(),
+                    id: Vec::new(),
+                    app: Vec::new(),
+                    title: Vec::new(),
+                    message: Vec::new(),
                 },
                 Seen::Reset,
             ]
         );
+    }
+
+    #[test]
+    fn reset_callback_only_reports_stream_full_resets() {
+        let resets = std::cell::Cell::new(0);
+        let mut terminal = Terminal::new(8, 3).unwrap();
+        terminal.on_reset(|_| resets.set(resets.get() + 1)).unwrap();
+
+        terminal.vt_write(b"\x1b[!p");
+        terminal.reset();
+        terminal.clear_presentation();
+        assert_eq!(resets.get(), 0);
+
+        terminal.vt_write(b"\x1bc");
+        assert_eq!(resets.get(), 1);
     }
 }

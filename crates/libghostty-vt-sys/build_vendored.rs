@@ -33,6 +33,7 @@ fn build_vendored(link_mode: LinkMode, target: &str) {
     }
 
     let zig = ZigBuild {
+        executable: zig_executable(),
         target,
         host: &host,
         ios_platform,
@@ -41,7 +42,7 @@ fn build_vendored(link_mode: LinkMode, target: &str) {
     };
     let install_prefix = out_dir.join("ghostty-install");
     // Tell the gen-bindings tool, a binary of this crate, which headers
-    // this exact build installed. Cargo keeps one build output per feature
+    // belong to this exact build. Cargo keeps one build output per feature
     // set and profile, and ones from before a pin bump still hold the old
     // headers, so scanning the target directory can find stale ones.
     println!(
@@ -51,12 +52,10 @@ fn build_vendored(link_mode: LinkMode, target: &str) {
     // Rebuild when the Zig toolchain itself changes, not only its version
     // string; Cargo (and caches keyed on build-script inputs) otherwise
     // reuse an archive the previous binary produced.
-    // PATH decides which Zig runs (a Nix shell swaps store paths); the
-    // binary's own path catches an in-place upgrade.
+    // ZIG overrides PATH (a Nix shell swaps store paths); the binary's own
+    // path catches an in-place upgrade.
     println!("cargo:rerun-if-env-changed=PATH");
-    if let Some(zig) = zig_executable() {
-        println!("cargo:rerun-if-changed={}", zig.display());
-    }
+    println!("cargo:rerun-if-changed={}", zig.executable.display());
 
     // Locate ghostty source: env override > shared per-user build > fetch
     // into OUT_DIR. An override is a live checkout whose contents can change
@@ -102,6 +101,7 @@ fn build_vendored(link_mode: LinkMode, target: &str) {
 
 /// One `zig build` of libghostty-vt: everything that decides its output.
 struct ZigBuild<'a> {
+    executable: PathBuf,
     target: &'a str,
     host: &'a str,
     ios_platform: Option<&'static str>,
@@ -132,7 +132,7 @@ impl ZigBuild<'_> {
             &self.cpu,
         );
 
-        let mut build = Command::new("zig");
+        let mut build = Command::new(&self.executable);
         build
             .arg("build")
             .arg("-Demit-lib-vt=true")
@@ -161,7 +161,9 @@ impl ZigBuild<'_> {
 
         // Package managers can provide Ghostty's Zig package cache ahead of time
         // and ask Zig to resolve packages from that immutable store path instead
-        // of fetching during this Cargo build script.
+        // of fetching during this Cargo build script. Those sandboxes usually
+        // have no writable home either, so the global cache goes under work_dir.
+        // Zig 0.17 removed --global-cache-dir in favor of this environment variable.
         if let Ok(dir) = env::var("GHOSTTY_ZIG_SYSTEM_DIR") {
             assert!(
                 !dir.is_empty(),
@@ -176,8 +178,7 @@ impl ZigBuild<'_> {
             build
                 .arg("--system")
                 .arg(&zig_system_dir)
-                .arg("--global-cache-dir")
-                .arg(&zig_global_cache_dir);
+                .env("ZIG_GLOBAL_CACHE_DIR", &zig_global_cache_dir);
         }
 
         // Pass -Dtarget only for non-iOS cross targets; native builds let zig
@@ -189,5 +190,12 @@ impl ZigBuild<'_> {
         }
 
         run(build, "zig build");
+
+        // Wasm builds install the archive and module but not the headers.
+        // Keep the matching source headers in the install tree too, so shared
+        // cache hits can expose them without fetching or rebuilding Ghostty.
+        if target.starts_with("wasm") {
+            copy_dir_all(&ghostty_dir.join("include"), &install_prefix.join("include"));
+        }
     }
 }

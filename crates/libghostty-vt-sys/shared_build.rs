@@ -9,7 +9,7 @@
 // machine and yields byte-identical output wherever it is copied.
 
 /// Bump when the shared layout or what the key covers changes.
-const SHARED_BUILD_SCHEMA: &str = "1";
+const SHARED_BUILD_SCHEMA: &str = "2";
 
 /// Marker written after a complete build. Its mtime records the last use.
 const SHARED_BUILD_COMPLETE: &str = "complete";
@@ -130,24 +130,21 @@ fn shared_build_key(zig: &ZigBuild) -> String {
     key.write(zig.ios_platform.unwrap_or(""));
     key.write(zig.optimize);
     key.write(&zig.cpu);
-    key.write(&zig_version());
+    key.write(&zig_version(&zig.executable));
     // Two Zig builds can report the same version and still emit different
     // objects: nixpkgs' 0.16.0 rebuilt with GCC 16 wrote random undefined
     // section symbols that the release binary does not. Key on the binary
     // itself, so a different Zig never reuses another's archive.
-    key.write(&zig_identity());
+    key.write(&zig_identity(&zig.executable));
     for name in environment {
         key.write(&env::var(name).unwrap_or_default());
     }
     format!("{}-{:016x}", &GHOSTTY_COMMIT[..12], key.finish())
 }
 
-/// The `zig` on PATH, as its canonical path plus size and modification time.
-fn zig_identity() -> String {
-    let Some(zig) = zig_executable() else {
-        return String::new();
-    };
-    let (len, modified) = std::fs::metadata(&zig)
+/// The selected Zig's canonical path plus size and modification time.
+fn zig_identity(zig: &Path) -> String {
+    let (len, modified) = std::fs::metadata(zig)
         .map(|meta| (meta.len(), meta.modified().ok()))
         .unwrap_or((0, None));
     let modified = modified
@@ -156,17 +153,45 @@ fn zig_identity() -> String {
     format!("{} {len} {modified}", zig.display())
 }
 
-/// Resolve `zig` the way `Command::new("zig")` will: the first match on PATH.
-fn zig_executable() -> Option<PathBuf> {
-    let name = if cfg!(windows) { "zig.exe" } else { "zig" };
-    env::split_paths(&env::var_os("PATH")?)
-        .map(|dir| dir.join(name))
-        .find(|candidate| candidate.is_file())
+/// Resolve ZIG (or `zig` on PATH) before changing the build's working directory.
+fn zig_executable() -> PathBuf {
+    let mut command = PathBuf::from(env::var_os("ZIG").unwrap_or_else(|| "zig".into()));
+    // Windows appends .exe even for explicit paths. Resolve that same file so
+    // toolchain watching and shared-cache identity cover the actual executable.
+    if cfg!(windows) && command.extension().is_none() {
+        command.set_extension("exe");
+    }
+    if command.is_absolute() || command.components().count() > 1 {
+        return std::fs::canonicalize(&command).unwrap_or(command);
+    }
+    env::var_os("PATH")
+        .and_then(|path| {
+            env::split_paths(&path)
+                .map(|dir| dir.join(&command))
+                .find(|candidate| {
+                    let Ok(metadata) = std::fs::metadata(candidate) else {
+                        return false;
+                    };
+                    if !metadata.is_file() {
+                        return false;
+                    }
+                    #[cfg(unix)]
+                    {
+                        use std::os::unix::fs::PermissionsExt;
+                        metadata.permissions().mode() & 0o111 != 0
+                    }
+                    #[cfg(not(unix))]
+                    {
+                        true
+                    }
+                })
+        })
         .and_then(|zig| std::fs::canonicalize(zig).ok())
+        .unwrap_or(command)
 }
 
-fn zig_version() -> String {
-    let output = Command::new("zig")
+fn zig_version(zig: &Path) -> String {
+    let output = Command::new(zig)
         .arg("version")
         .output()
         .unwrap_or_else(|error| panic!("failed to run zig version: {error}"));

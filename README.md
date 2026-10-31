@@ -2,6 +2,18 @@
 
 Rust bindings and safe API for [libghostty-vt](https://ghostty.org), the virtual terminal emulator library extracted from [Ghostty](https://ghostty.org).
 
+This downstream fork integrates upstream Rust improvements while retaining its
+snapshot capture, parser-preserving clear, reset callbacks, and prebuilt-library
+support. The native engine pin includes the image-rendering, animation, and VT
+blank-row fixes needed by those APIs, plus a WASM32-compatible terminal identity
+counter.
+
+The upstream API now uses `terminal::ProgramStatus` instead of
+`ProgramStatusReport`. Its text getters, terminal title and working directory,
+clipboard MIME types, and build version strings return bytes; validate or decode
+them at the application boundary. `ProgramStatus::kind()` returns a `Result`
+including `ProgramStatusKind::None`.
+
 ## Workspace Layout
 
 - `crates/libghostty-vt-sys` — raw FFI bindings generated from `ghostty/vt.h`
@@ -80,9 +92,13 @@ built by `.github/workflows/prebuilt.yml`.
 
 ### Building from source
 
-Building from source requires [Zig](https://ziglang.org/) 0.16.x on PATH. The
-ghostty source is fetched automatically at build time from the pinned commit in
-`build.rs`. Set `GHOSTTY_SOURCE_DIR` to make the build use a local Ghostty
+Building from source requires [Zig](https://ziglang.org/) 0.16.x on PATH, or
+selected through `ZIG`. Set `ZIG` to an executable path or command name, without
+arguments, to override the default `zig` executable. This fork retains its
+downstream Ghostty engine and Zig 0.16 toolchain while integrating the upstream
+Rust APIs; upstream's Zig 0.17 requirement does not apply to this pin.
+The Ghostty source is fetched automatically at build time from the pinned commit
+in `build.rs`. Set `GHOSTTY_SOURCE_DIR` to make the build use a local Ghostty
 checkout instead. Package managers that need network-free builds can also set
 `GHOSTTY_ZIG_SYSTEM_DIR` to a pre-fetched Zig package directory; this is passed
 to `zig build --system` so Zig does not download package dependencies during
@@ -137,8 +153,8 @@ cargo build --manifest-path example/Cargo.toml --workspace
 
 ### Regenerating bindings
 
-`crates/libghostty-vt-sys/src/bindings.rs` is checked in and must match the
-Ghostty commit pinned in both `crates/libghostty-vt-sys/build.rs` and
+`bindings.rs` and `layouts.rs` in `crates/libghostty-vt-sys/src/` are checked
+in and must match the Ghostty commit pinned in `crates/libghostty-vt-sys/build.rs` and
 `flake.nix` (run `nix flake update ghostty` after changing the latter); the
 `bindings-fresh` Nix check fails otherwise. After bumping the pin, regenerate
 the bindings from the dev shell:
@@ -149,7 +165,14 @@ cargo run -p libghostty-vt-sys --features bindgen-tool --bin gen-bindings && car
 
 The generator reads the headers from `GHOSTTY_INCLUDE_DIR`, or from
 `GHOSTTY_SOURCE_DIR/include`, and otherwise from the headers the build script
-installed for that same build.
+installed for that same build. It parses them for each vendored target using
+explicit Clang targets and verifies that the API declarations are identical.
+`layouts.rs` holds compile-time size, alignment and field-offset assertions,
+gated by the target ABI reported by `rustc`. Targets share checks only when
+Clang generated identical assertions. Adding a vendored target also requires
+adding it to the generator's `TARGETS` list; unlisted targets receive no layout
+checks. Regeneration needs no target SDKs or installed cross-target Rust standard
+libraries, and ordinary builds need neither Clang nor the generator.
 
 ### Miri Verification
 
@@ -165,6 +188,51 @@ as string, slice, and allocator plumbing. They do not execute the native
 Ghostty FFI backend.
 
 Use `nix develop .#miri` when working interactively with the same toolchain.
+
+### WebAssembly
+
+Wasm support is selected by the Rust target, not a Cargo feature. The existing
+Rust API links Ghostty's static archive into the application's Wasm module;
+no JavaScript bindings or browser dependencies are added to either library crate.
+Do not enable `link-dynamic` on Wasm.
+
+| Rust target | Zig target | Toolchain |
+| --- | --- | --- |
+| `wasm32-unknown-unknown` | `wasm32-freestanding` | Stable Rust, including the MSRV |
+| `wasm64-unknown-unknown` | `wasm64-freestanding` | Nightly with `rust-src` and `-Zbuild-std=std,panic_abort`; a Memory64-capable runtime |
+
+The pinned Ghostty revision builds both freestanding architectures. Its
+`wasm32-wasi` build fails because its panic/stderr path requires libc without
+linking it, and its standalone Emscripten module fails to link libc. WASI
+(including Rust's preview variants) and Emscripten are not supported by this
+integration until those upstream build paths work. `wasm32v1-none` is a
+`no_std` Rust target; these crates require `std`. Wasm does not imply support
+for Rust threads, filesystem access, or networking.
+
+The [browser example](example/wasm_rs/README.md) ports upstream's `wasm-vt`
+demo to the Rust API. Its ABI and allocator smoke tests are separate from
+the demo. Run both with Node.js (provided by the dev shells):
+
+```sh
+nix develop -c cargo build --locked --manifest-path example/Cargo.toml -p wasm_rs --lib --example smoke --target wasm32-unknown-unknown --release
+nix develop -c node example/wasm_rs/run.mjs example/target/wasm32-unknown-unknown/release/examples/smoke.wasm example/target/wasm32-unknown-unknown/release/wasm_rs.wasm
+
+nix develop .#wasm64 -c cargo build -Zbuild-std=std,panic_abort --locked --manifest-path example/Cargo.toml -p wasm_rs --lib --example smoke --target wasm64-unknown-unknown --release
+nix develop .#wasm64 -c node example/wasm_rs/run.mjs example/target/wasm64-unknown-unknown/release/examples/smoke.wasm example/target/wasm64-unknown-unknown/release/wasm_rs.wasm
+```
+
+CI also executes Debug builds. Ghostty's Debug Wasm build imports
+`env.log(pointer, length)`; the example runner supplies it. Its release build
+discards logs instead of calling the native logger hook. Embedders must
+register a cryptographically secure source through
+`sys::set_secure_random_source` before using operations that require entropy;
+freestanding Ghostty has no platform entropy source. Browser applications can
+supply Web Crypto from their own host integration.
+
+The raw `ghostty_wasm_*` allocation helpers are available through
+`libghostty-vt-sys` on Wasm. Rust callers normally use the existing owned types
+and allocator APIs instead; the helpers are intended for hosts managing raw
+Wasm memory. Do not mix their allocations with `ghostty_free` or Rust's heap.
 
 ### Running the example
 

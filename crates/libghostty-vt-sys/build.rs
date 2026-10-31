@@ -4,7 +4,7 @@ use std::process::Command;
 
 /// Pinned ghostty commit. Update this to pull a newer version.
 const GHOSTTY_REPO: &str = "https://github.com/phall1/ghostty.git";
-const GHOSTTY_COMMIT: &str = "160107b56461ab989929b8595d83ec1df33d4275";
+const GHOSTTY_COMMIT: &str = "e541a6407d5e8e35377dc1a079487f06a43539a5";
 
 /// File name of the static archive on Windows. Ghostty installs it under this
 /// name for every Windows ABI so it does not collide with `ghostty-vt.lib`,
@@ -86,11 +86,19 @@ fn main() {
     // hand it to whichever path runs rather than re-reading it per call site.
     let target = env::var("TARGET").expect("TARGET must be set");
 
+    // Wasm consumers link the archive into their own module, not a native
+    // shared library. Check before pkg-config as well as the source build.
+    assert!(
+        !target.starts_with("wasm") || matches!(link_mode, LinkMode::Static),
+        "Wasm targets support static linking only; disable the link-dynamic feature"
+    );
+
     println!("cargo:rerun-if-env-changed=LIBGHOSTTY_VT_SYS_CPU");
     println!("cargo:rerun-if-env-changed=LIBGHOSTTY_VT_SYS_OPTIMIZE");
     println!("cargo:rerun-if-env-changed=GHOSTTY_SOURCE_DIR");
     println!("cargo:rerun-if-env-changed=LIBGHOSTTY_VT_SYS_LIB_DIR");
     println!("cargo:rerun-if-env-changed=GHOSTTY_ZIG_SYSTEM_DIR");
+    println!("cargo:rerun-if-env-changed=ZIG");
     println!("cargo:rerun-if-env-changed=TARGET");
     println!("cargo:rerun-if-env-changed=HOST");
     println!("cargo:rerun-if-env-changed=DEBUG");
