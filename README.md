@@ -151,6 +151,10 @@ cargo test -p libghostty-vt-sys
 cargo build --manifest-path example/Cargo.toml --workspace
 ```
 
+CI runs the Nix checks on GitHub-hosted Linux x86_64/arm64 and macOS arm64
+runners, with separate Windows GNU/MSVC and Linux Miri jobs. The fork does not
+require access to upstream's Namespace runner pool.
+
 ### Regenerating bindings
 
 `bindings.rs` and `layouts.rs` in `crates/libghostty-vt-sys/src/` are checked
