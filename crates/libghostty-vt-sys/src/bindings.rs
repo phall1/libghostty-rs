@@ -4839,70 +4839,6 @@ unsafe extern "C" {
         out_written: *mut usize,
     ) -> Result::Type;
 }
-#[repr(C)]
-#[derive(Debug, Copy, Clone)]
-pub struct SnapshotCaptureImpl {
-    _unused: [u8; 0],
-}
-#[doc = " Opaque bounded progressive snapshot capture."]
-pub type SnapshotCapture = *mut SnapshotCaptureImpl;
-#[doc = " Limits fixed when a progressive capture is created."]
-#[repr(C)]
-#[derive(Debug, Default, Copy, Clone)]
-pub struct SnapshotCaptureOptions {
-    pub size: usize,
-    #[doc = " Maximum encoded bytes of any capture event, including grouped records."]
-    pub max_record_bytes: usize,
-    pub max_pages: usize,
-}
-pub mod SnapshotCaptureEventKind {
-    #[doc = " Boundary emitted by one progressive capture step."]
-    pub type Type = ::std::os::raw::c_int;
-    pub const RECORD: Type = 0;
-    pub const READY: Type = 1;
-    pub const HISTORY_PAGE: Type = 2;
-    pub const FINISH: Type = 3;
-    #[doc = " One cold-page descriptor was scanned; no bytes were written."]
-    pub const SCAN: Type = 4;
-    #[doc = " The READY cut can no longer be read safely; no bytes were written."]
-    pub const INVALIDATED: Type = 5;
-    #[doc = " One complete Kitty pixel payload; not a history page or FINISH."]
-    pub const IMAGE: Type = 6;
-    #[doc = " One complete Kitty pixel payload; not a history page or FINISH."]
-    pub const MAX_VALUE: Type = 2147483647;
-}
-pub mod SnapshotCaptureInvalidation {
-    #[doc = " Typed reason a detached READY history cut became unusable."]
-    pub type Type = ::std::os::raw::c_int;
-    pub const NONE: Type = 0;
-    pub const WRONG_TERMINAL: Type = 1;
-    pub const RESET: Type = 2;
-    pub const RESIZE: Type = 3;
-    pub const MUTATION: Type = 4;
-    pub const EVICTED: Type = 5;
-    pub const MAX_VALUE: Type = 2147483647;
-}
-#[doc = " Metadata for bytes synchronously written by one capture step."]
-#[repr(C)]
-#[derive(Debug, Copy, Clone)]
-pub struct SnapshotCaptureEvent {
-    pub size: usize,
-    pub kind: SnapshotCaptureEventKind::Type,
-    pub screen: TerminalScreen::Type,
-    pub rows: usize,
-    pub remaining: u32,
-    pub written: usize,
-    pub invalidation: SnapshotCaptureInvalidation::Type,
-}
-impl Default for SnapshotCaptureEvent {
-    fn default() -> Self {
-        let mut s = ::std::mem::MaybeUninit::<Self>::uninit();
-        unsafe {
-            ::std::ptr::write_bytes(s.as_mut_ptr(), 0, 1);
-            s.assume_init()
-        }
-    }
-}
 pub mod SnapshotDecoderOption {
     #[doc = " Configurable snapshot decoder options.\n\n Options may only be changed before decoding starts. Calling\n ghostty_snapshot_decoder_set() after ghostty_snapshot_decoder_ready() or\n ghostty_snapshot_decoder_decode() returns GHOSTTY_INVALID_VALUE."]
     pub type Type = ::std::os::raw::c_int;
@@ -4976,39 +4912,6 @@ pub mod SnapshotDecoderData {
 unsafe extern "C" {
     #[doc = " Encode a complete terminal snapshot to a writer.\n\n The terminal's persistent VT stream supplies the continuation bytes needed\n to reconstruct unfinished parser state. You must prevent concurrent\n writes or other terminal mutation for the duration of this call. The writer\n callback must not call terminal APIs with the same terminal handle.\n A terminal can be encoded with tracking disabled when its VT parser and\n UTF-8 decoder are both at ground. If either is unfinished, tracking must\n have been enabled before the input that produced that state was written;\n otherwise this returns GHOSTTY_INVALID_VALUE.\n\n Encoding begins at the writer's current position. If an error occurs, the\n writer may contain a partial snapshot without a valid FINISH marker.\n Calls to the writer are synchronous; this function does not flush or make\n your destination durable.\n\n         output, GHOSTTY_LIMIT_EXCEEDED if output accounting overflows, or\n         another error code on failure\n"]
     pub fn ghostty_snapshot_encode(terminal: Terminal, writer: Writer) -> Result::Type;
-}
-unsafe extern "C" {
-    #[doc = " Create a record-at-a-time capture using the current GHOSTSNP format.\n\n The writer and any custom allocator backing it or the terminal must remain\n alive until the capture is freed. The terminal must remain alive and\n immutable until READY and successful ghostty_snapshot_capture_detach;\n after detachment it may be mutated between history calls or destroyed.\n Detached capture destruction never dereferences the source.\n The capture allocates exactly\n `max_record_bytes - 10` bytes of reusable payload scratch and never stages a\n complete snapshot. A history step includes a PAGE's optional Kitty placement\n record as the same decoder unit. max_record_bytes bounds the complete group;\n an oversized group writes no bytes. Kitty-bearing captures allocate one\n additional max_record_bytes buffer for grouping and reuse upstream's image\n planning (which walks pages and placements); text-only capture creation\n and detachment do not traverse history. Changing Kitty storage after READY\n invalidates the capture before any borrowed image pointers are accessed.\n After an encoding or writer error, free the capture; it cannot be resumed."]
-    pub fn ghostty_snapshot_capture_new(
-        allocator: *const Allocator,
-        terminal: Terminal,
-        writer: Writer,
-        options: *const SnapshotCaptureOptions,
-        capture: *mut SnapshotCapture,
-    ) -> Result::Type;
-}
-unsafe extern "C" {
-    #[doc = " Emit one complete prefix envelope or record through READY."]
-    pub fn ghostty_snapshot_capture_next(
-        capture: SnapshotCapture,
-        event: *mut SnapshotCaptureEvent,
-    ) -> Result::Type;
-}
-unsafe extern "C" {
-    #[doc = " Detach the O(1) history cut after READY and release the terminal borrow."]
-    pub fn ghostty_snapshot_capture_detach(capture: SnapshotCapture) -> Result::Type;
-}
-unsafe extern "C" {
-    #[doc = " Perform one bounded detached-history step against the original terminal.\n\n SCAN writes no bytes and inspects one cold page. RECORD, IMAGE, and FINISH\n each write one complete GHOSTSNP v1 record. HISTORY_PAGE writes a PAGE and\n its optional Kitty placement record as one bounded unit. INVALIDATED writes no\n bytes and carries a typed tombstone; no FINISH can be produced afterward.\n The terminal is borrowed immutably only for this synchronous call and may be\n mutated between calls. It must be the original still-live terminal passed to\n ghostty_snapshot_capture_new. Every terminal receives a non-address identity;\n a replacement terminal is reported as WRONG_TERMINAL even if its allocation\n reuses the original address."]
-    pub fn ghostty_snapshot_capture_next_history(
-        capture: SnapshotCapture,
-        terminal: Terminal,
-        event: *mut SnapshotCaptureEvent,
-    ) -> Result::Type;
-}
-unsafe extern "C" {
-    #[doc = " Free capture state; NULL is a no-op."]
-    pub fn ghostty_snapshot_capture_free(capture: SnapshotCapture);
 }
 unsafe extern "C" {
     #[doc = " Encode a complete terminal snapshot to a caller-provided buffer.\n\n Pass NULL for buf with buf_len zero to query the required size. If the\n buffer is too small, this returns GHOSTTY_OUT_OF_SPACE and stores the\n required capacity in out_written. A non-NULL undersized buffer may contain\n a partial snapshot prefix. On success, out_written receives the number of\n bytes encoded.\n\n A terminal can be encoded with tracking disabled when its VT parser and\n UTF-8 decoder are both at ground. If either is unfinished, tracking must\n have been enabled before the input that produced that state was written;\n otherwise this returns GHOSTTY_INVALID_VALUE.\n\n             GHOSTTY_OUT_OF_SPACE (NULL returns GHOSTTY_INVALID_VALUE)\n"]

@@ -273,10 +273,6 @@ const PREFIXES: &[(&str, &str)] = &[
         "GhosttySnapshotDecoderOption",
         "GHOSTTY_SNAPSHOT_DECODER_OPT",
     ),
-    (
-        "GhosttySnapshotCaptureEventKind",
-        "GHOSTTY_SNAPSHOT_CAPTURE_EVENT",
-    ),
     ("GhosttySemanticPromptKind", "GHOSTTY_SEMANTIC_PROMPT"),
     (
         "GhosttySemanticPromptPromptKind",

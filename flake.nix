@@ -20,7 +20,7 @@
     };
     ghostty = {
       # vt-1.0.0 plus the narrow phux APIs; keep in sync with build.rs.
-      url = "github:phall1/ghostty/0aa049ea7b9075edbd1b598f03290f278ab8a4cc";
+      url = "github:phall1/ghostty/511a1fabb48ab00715cdb22ce13a7191217e8086";
     };
   };
 
@@ -89,7 +89,7 @@
             (previousAttrs.patches or [])
             ++ ["${ghostty}/nix/patches/zig-0.17-ios-process-replace.patch"];
         });
-        # The vanilla 1.0 release lacks this fork's narrow capture APIs.
+        # The vanilla 1.0 release lacks this fork's staged decoder and helpers.
         # Both link modes must use the same pinned fork, never that archive.
         ghosttyLib = ghostty.packages.${system}.libghostty-vt;
 

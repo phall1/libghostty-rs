@@ -1046,39 +1046,6 @@ mod layout_0 {
         ["Offset of field: Paste::allow_unsafe"]
             [::std::mem::offset_of!(Paste, allow_unsafe) - 48usize];
     };
-    #[allow(clippy::unnecessary_operation, clippy::identity_op)]
-    const _: () = {
-        ["Size of SnapshotCaptureOptions"]
-            [::std::mem::size_of::<SnapshotCaptureOptions>() - 24usize];
-        ["Alignment of SnapshotCaptureOptions"]
-            [::std::mem::align_of::<SnapshotCaptureOptions>() - 8usize];
-        ["Offset of field: SnapshotCaptureOptions::size"]
-            [::std::mem::offset_of!(SnapshotCaptureOptions, size) - 0usize];
-        ["Offset of field: SnapshotCaptureOptions::max_record_bytes"]
-            [::std::mem::offset_of!(SnapshotCaptureOptions, max_record_bytes) - 8usize];
-        ["Offset of field: SnapshotCaptureOptions::max_pages"]
-            [::std::mem::offset_of!(SnapshotCaptureOptions, max_pages) - 16usize];
-    };
-    #[allow(clippy::unnecessary_operation, clippy::identity_op)]
-    const _: () = {
-        ["Size of SnapshotCaptureEvent"][::std::mem::size_of::<SnapshotCaptureEvent>() - 48usize];
-        ["Alignment of SnapshotCaptureEvent"]
-            [::std::mem::align_of::<SnapshotCaptureEvent>() - 8usize];
-        ["Offset of field: SnapshotCaptureEvent::size"]
-            [::std::mem::offset_of!(SnapshotCaptureEvent, size) - 0usize];
-        ["Offset of field: SnapshotCaptureEvent::kind"]
-            [::std::mem::offset_of!(SnapshotCaptureEvent, kind) - 8usize];
-        ["Offset of field: SnapshotCaptureEvent::screen"]
-            [::std::mem::offset_of!(SnapshotCaptureEvent, screen) - 12usize];
-        ["Offset of field: SnapshotCaptureEvent::rows"]
-            [::std::mem::offset_of!(SnapshotCaptureEvent, rows) - 16usize];
-        ["Offset of field: SnapshotCaptureEvent::remaining"]
-            [::std::mem::offset_of!(SnapshotCaptureEvent, remaining) - 24usize];
-        ["Offset of field: SnapshotCaptureEvent::written"]
-            [::std::mem::offset_of!(SnapshotCaptureEvent, written) - 32usize];
-        ["Offset of field: SnapshotCaptureEvent::invalidation"]
-            [::std::mem::offset_of!(SnapshotCaptureEvent, invalidation) - 40usize];
-    };
 }
 #[cfg(all(
     target_abi = "",
@@ -1995,38 +1962,5 @@ mod layout_1 {
         ["Offset of field: Paste::reader"][::std::mem::offset_of!(Paste, reader) - 20usize];
         ["Offset of field: Paste::allow_unsafe"]
             [::std::mem::offset_of!(Paste, allow_unsafe) - 28usize];
-    };
-    #[allow(clippy::unnecessary_operation, clippy::identity_op)]
-    const _: () = {
-        ["Size of SnapshotCaptureOptions"]
-            [::std::mem::size_of::<SnapshotCaptureOptions>() - 12usize];
-        ["Alignment of SnapshotCaptureOptions"]
-            [::std::mem::align_of::<SnapshotCaptureOptions>() - 4usize];
-        ["Offset of field: SnapshotCaptureOptions::size"]
-            [::std::mem::offset_of!(SnapshotCaptureOptions, size) - 0usize];
-        ["Offset of field: SnapshotCaptureOptions::max_record_bytes"]
-            [::std::mem::offset_of!(SnapshotCaptureOptions, max_record_bytes) - 4usize];
-        ["Offset of field: SnapshotCaptureOptions::max_pages"]
-            [::std::mem::offset_of!(SnapshotCaptureOptions, max_pages) - 8usize];
-    };
-    #[allow(clippy::unnecessary_operation, clippy::identity_op)]
-    const _: () = {
-        ["Size of SnapshotCaptureEvent"][::std::mem::size_of::<SnapshotCaptureEvent>() - 28usize];
-        ["Alignment of SnapshotCaptureEvent"]
-            [::std::mem::align_of::<SnapshotCaptureEvent>() - 4usize];
-        ["Offset of field: SnapshotCaptureEvent::size"]
-            [::std::mem::offset_of!(SnapshotCaptureEvent, size) - 0usize];
-        ["Offset of field: SnapshotCaptureEvent::kind"]
-            [::std::mem::offset_of!(SnapshotCaptureEvent, kind) - 4usize];
-        ["Offset of field: SnapshotCaptureEvent::screen"]
-            [::std::mem::offset_of!(SnapshotCaptureEvent, screen) - 8usize];
-        ["Offset of field: SnapshotCaptureEvent::rows"]
-            [::std::mem::offset_of!(SnapshotCaptureEvent, rows) - 12usize];
-        ["Offset of field: SnapshotCaptureEvent::remaining"]
-            [::std::mem::offset_of!(SnapshotCaptureEvent, remaining) - 16usize];
-        ["Offset of field: SnapshotCaptureEvent::written"]
-            [::std::mem::offset_of!(SnapshotCaptureEvent, written) - 20usize];
-        ["Offset of field: SnapshotCaptureEvent::invalidation"]
-            [::std::mem::offset_of!(SnapshotCaptureEvent, invalidation) - 24usize];
     };
 }
