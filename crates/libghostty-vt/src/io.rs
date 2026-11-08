@@ -29,6 +29,18 @@ pub fn to_writer<W: Write>(w: &mut W) -> ffi::Writer {
 
 /// Adapt a [`std::io::Read`] to a libghostty-friendly Reader object.
 pub fn to_reader<R: Read>(r: &mut R) -> ffi::Reader {
+    // SAFETY: The caller borrows the reader for the callback's lifetime.
+    unsafe { to_reader_raw(std::ptr::from_mut(r)) }
+}
+
+/// Adapt an independently owned callback context without deriving retained
+/// userdata from a temporary exclusive reborrow.
+///
+/// # Safety
+///
+/// `r` must remain live and exclusively accessible during each synchronous
+/// callback. Its owner must drop the native reader before freeing the context.
+pub(crate) unsafe fn to_reader_raw<R: Read>(r: *mut R) -> ffi::Reader {
     unsafe extern "C" fn trampoline<R: Read>(
         userdata: *mut ::std::os::raw::c_void,
         buffer: *mut u8,
@@ -59,7 +71,7 @@ pub fn to_reader<R: Read>(r: &mut R) -> ffi::Reader {
     }
 
     ffi::Reader {
-        userdata: std::ptr::from_mut(r).cast(),
+        userdata: r.cast(),
         read: Some(trampoline::<R>),
     }
 }

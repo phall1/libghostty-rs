@@ -2,7 +2,7 @@ name: Windows CI
 
 on:
   push:
-    branches: [master, "release/**"]
+    branches: [master, "release/**", "feat/phux-vt-1"]
   pull_request:
     # `edited` covers a retargeted base, which happens to every stacked PR
     # once the one below it merges.

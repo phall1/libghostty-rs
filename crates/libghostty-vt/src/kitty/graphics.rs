@@ -913,6 +913,48 @@ impl Terminal<'_, '_> {
 }
 
 impl<'t> Graphics<'t> {
+    /// Read all resident image IDs, including images with no placements.
+    ///
+    /// Reuses `ids`' allocation and replaces its contents with IDs in ascending
+    /// order. An error leaves `ids` empty.
+    pub fn image_ids_into(&self, ids: &mut Vec<u32>) -> Result<()> {
+        ids.clear();
+        loop {
+            let capacity = ids.capacity();
+            let mut count = 0;
+            // SAFETY: Native initializes `count` entries only on success and
+            // never retains the pointer. The vector stays empty on failure.
+            let result = unsafe {
+                ffi::ghostty_kitty_graphics_image_ids(
+                    self.inner.as_raw(),
+                    if capacity == 0 {
+                        std::ptr::null_mut()
+                    } else {
+                        ids.as_mut_ptr()
+                    },
+                    capacity,
+                    &raw mut count,
+                )
+            };
+            if result == ffi::Result::OUT_OF_SPACE {
+                if count <= capacity {
+                    return Err(Error::InvalidValue);
+                }
+                ids.try_reserve_exact(count)
+                    .map_err(|_| Error::OutOfMemory)?;
+                continue;
+            }
+            from_result(result)?;
+            if count > capacity {
+                return Err(Error::InvalidValue);
+            }
+            // SAFETY: Success initialized exactly `count` entries.
+            unsafe { ids.set_len(count) };
+            ids.sort_unstable();
+            return Ok(());
+        }
+    }
+
     fn get<T>(&self, tag: ffi::KittyGraphicsData::Type) -> Result<T> {
         let mut value = MaybeUninit::<T>::zeroed();
         let result = unsafe {
@@ -1419,6 +1461,14 @@ impl<'t> PlacementIteration<'t, '_> {
     pub fn is_virtual(&self) -> Result<bool> {
         self.get(ffi::KittyGraphicsPlacementData::IS_VIRTUAL)
     }
+    /// Whether a Unicode placeholder without a placement ID selects this placement.
+    pub fn is_placeholder_default(&self) -> Result<bool> {
+        self.get(ffi::KittyGraphicsPlacementData::IS_PLACEHOLDER_DEFAULT)
+    }
+    /// Whether the client supplied this placement's ID.
+    pub fn is_external(&self) -> Result<bool> {
+        self.get(ffi::KittyGraphicsPlacementData::IS_EXTERNAL)
+    }
     /// Pixel offset from the left edge of the cell.
     pub fn x_offset(&self) -> Result<u32> {
         self.get(ffi::KittyGraphicsPlacementData::X_OFFSET)
@@ -1564,6 +1614,22 @@ pub enum Compression {
 // mutex rather than the logger's read-write lock.
 static DECODE_PNG: Mutex<Option<Box<dyn DecodePng>>> = Mutex::new(None);
 
+/// Install the built-in Rust PNG decoder for all terminals.
+///
+/// Unlike the upstream arbitrary-hook setter, this convenience function may
+/// be called while other threads use terminals. This fork atomically publishes
+/// the PNG hook, and the Rust decoder state is protected by a mutex. Repeated
+/// calls replace the process-global decoder with a fresh built-in decoder.
+///
+/// Do not call from inside a PNG decoder callback: decoding holds that mutex.
+#[cfg(feature = "png")]
+pub fn install_rust_png_decoder() -> Result<()> {
+    // SAFETY: The fork synchronizes both C/global and terminal/sys PNG hook
+    // accesses. Rust's callback has no external userdata and serializes access
+    // to its Send decoder; replacing state drops the old decoder after unlock.
+    unsafe { set_png_decoder(Some(Box::new(RustPngDecoder::new()))) }
+}
+
 /// Set the PNG decoder.
 ///
 /// When set, the terminal can accept PNG images via the Kitty Graphics Protocol.
@@ -1575,8 +1641,9 @@ static DECODE_PNG: Mutex<Option<Box<dyn DecodePng>>> = Mutex::new(None);
 ///
 /// # Safety
 ///
-/// libghostty does not synchronize this setting, so this must not be called
-/// while any other thread may be inside a libghostty call.
+/// This arbitrary-hook API retains upstream's conservative contract: do not
+/// call it while another thread may be inside a libghostty call. With the
+/// `png` feature, the built-in decoder has a separate safe installation helper.
 pub unsafe fn set_png_decoder(f: Option<Box<dyn DecodePng>>) -> Result<()> {
     unsafe extern "C" fn callback(
         _userdata: *mut std::ffi::c_void,

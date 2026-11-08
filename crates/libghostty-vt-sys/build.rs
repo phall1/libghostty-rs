@@ -3,9 +3,9 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 /// Pinned ghostty commit. Update this to pull a newer version.
-const GHOSTTY_REPO: &str = "https://github.com/ghostty-org/ghostty.git";
-// vt-1.0.0, pinned by commit so tag changes cannot alter the source.
-const GHOSTTY_COMMIT: &str = "0fa3d577a5614150ff8e2c152de5fb9d5c6d2dec";
+const GHOSTTY_REPO: &str = "https://github.com/phall1/ghostty.git";
+// vt-1.0.0 plus the narrowly retained phux APIs, pinned immutably.
+const GHOSTTY_COMMIT: &str = "0aa049ea7b9075edbd1b598f03290f278ab8a4cc";
 
 /// File name of the static archive on Windows. Ghostty installs it under this
 /// name for every Windows ABI so it does not collide with `ghostty-vt.lib`,
@@ -69,6 +69,9 @@ impl LinkMode {
 }
 
 fn main() {
+    // Switching from documentation/type-only work back to a native build must
+    // restore link metadata instead of reusing the early-return output.
+    println!("cargo:rerun-if-env-changed=DOCS_RS");
     // docs.rs has no Zig toolchain. The checked-in bindings in src/bindings.rs
     // are enough for generating documentation, so skip the entire native
     // build when running under docs.rs.
@@ -97,13 +100,23 @@ fn main() {
     println!("cargo:rerun-if-env-changed=LIBGHOSTTY_VT_SYS_CPU");
     println!("cargo:rerun-if-env-changed=LIBGHOSTTY_VT_SYS_OPTIMIZE");
     println!("cargo:rerun-if-env-changed=GHOSTTY_SOURCE_DIR");
+    println!("cargo:rerun-if-env-changed=LIBGHOSTTY_VT_SYS_LIB_DIR");
     println!("cargo:rerun-if-env-changed=GHOSTTY_ZIG_SYSTEM_DIR");
     println!("cargo:rerun-if-env-changed=ZIG");
     println!("cargo:rerun-if-env-changed=TARGET");
     println!("cargo:rerun-if-env-changed=HOST");
     println!("cargo:rerun-if-env-changed=DEBUG");
     println!("cargo:rerun-if-env-changed=OPT_LEVEL");
-    println!("cargo:rerun-if-changed=build.rs");
+    for path in [
+        "build.rs",
+        "build_vendored.rs",
+        "download.rs",
+        "prebuilt.rs",
+        "shared_build.rs",
+        "link_emit.rs",
+    ] {
+        println!("cargo:rerun-if-changed={path}");
+    }
 
     // An explicit source override should stay authoritative even when the
     // pkg-config feature is enabled, so local Ghostty checkouts remain easy to
@@ -113,293 +126,35 @@ fn main() {
         return;
     }
 
+    if let Some(dir) = env::var_os("LIBGHOSTTY_VT_SYS_LIB_DIR") {
+        assert!(
+            !dir.is_empty(),
+            "LIBGHOSTTY_VT_SYS_LIB_DIR must not be empty"
+        );
+        link_prebuilt(link_mode, &target, Path::new(&dir));
+        return;
+    }
+
     // When the pkg-config feature is enabled, prefer an installed library over
-    // fetching Ghostty. libghostty is pre-1.0, so this crate intentionally does
-    // not promise compatibility with every installed C API revision.
+    // fetching Ghostty. This fork's extra C APIs require the matching engine;
+    // an arbitrary vanilla 1.0 installation is not equivalent.
     #[cfg(feature = "pkg-config")]
     if try_pkg_config(link_mode, &target) {
+        return;
+    }
+
+    if try_download_prebuilt(link_mode, &target) {
         return;
     }
 
     build_vendored(link_mode, &target);
 }
 
-/// Build libghostty-vt from source via zig. The zig build itself generates
-/// shared and static artifacts plus pkg-config files in `share/pkgconfig/`.
-fn build_vendored(link_mode: LinkMode, target: &str) {
-    let out_dir = PathBuf::from(env::var("OUT_DIR").expect("OUT_DIR must be set"));
-    let host = env::var("HOST").expect("HOST must be set");
-
-    // Locate ghostty source: env override > fetch into OUT_DIR.
-    let ghostty_dir = match env::var("GHOSTTY_SOURCE_DIR") {
-        Ok(dir) => {
-            let p = PathBuf::from(dir);
-            assert!(
-                p.join("build.zig").exists(),
-                "GHOSTTY_SOURCE_DIR does not contain build.zig: {}",
-                p.display()
-            );
-            p
-        }
-        Err(_) => fetch_ghostty(&out_dir),
-    };
-
-    // Build libghostty-vt via zig.
-    let install_prefix = out_dir.join("ghostty-install");
-    // Upstream installs the Wasm archive and standalone module, but not
-    // headers. Use the same source revision rather than a host installation.
-    let include_dir = if target.starts_with("wasm") {
-        ghostty_dir.join("include")
-    } else {
-        install_prefix.join("include")
-    };
-    // Tell the gen-bindings tool, a binary of this crate, which headers
-    // belong to this exact build. Cargo keeps one build output per feature
-    // set and profile, and ones from before a pin bump still hold the old
-    // headers, so scanning the target directory can find stale ones.
-    println!(
-        "cargo:rustc-env=LIBGHOSTTY_VT_SYS_INCLUDE_DIR={}",
-        include_dir.display()
-    );
-    let zig_cache_dir = out_dir.join("zig-cache");
-    let zig_global_cache_dir = out_dir.join("zig-global-cache");
-
-    let optimize = zig_optimize_mode();
-    let cpu = env::var("LIBGHOSTTY_VT_SYS_CPU").unwrap_or_else(|_| "baseline".to_owned());
-    assert!(
-        !cpu.is_empty(),
-        "LIBGHOSTTY_VT_SYS_CPU must not be empty when set"
-    );
-
-    // iOS builds go through ghostty's emit-xcframework path instead of a flat
-    // `-Dtarget=<ios> --sysroot=<sdk>` invocation. The flat build breaks down
-    // for iOS: a generic target baseline can't compile simdutf's always_inline
-    // NEON intrinsics, and `--sysroot` applies globally so it leaks into the
-    // native codegen tools ghostty runs mid-build. The xcframework path runs
-    // host-native and configures each Apple platform itself, so we build that
-    // and pull out the library we need afterwards.
-    let ios_platform = ios_xcframework_platform(target);
-    if ios_platform.is_some() {
-        // Ghostty only emits the xcframework when zig itself runs on macOS
-        // (it shells out to xcodebuild). Without this check a Linux cross
-        // build would silently produce a host-native library and then fail on
-        // a confusing missing-xcframework assertion after the full build.
-        assert!(
-            host.contains("apple-darwin"),
-            "building for {target} requires a macOS host with Xcode and the iOS SDK \
-             (ghostty's emit-xcframework path runs host-native); host is {host}"
-        );
-        // The xcframework contains only static archives, and the flat layout
-        // below is populated from one of them. Fail up front instead of
-        // letting the shared-library search fail with a misleading message.
-        assert!(
-            matches!(link_mode, LinkMode::Static),
-            "building for {target} supports static linking only; \
-             disable the link-dynamic feature"
-        );
-    }
-
-    // Users can override the zig command with the `ZIG` env variable.
-    // We default to assuming zig is in path.
-    let zig = env::var_os("ZIG").unwrap_or_else(|| "zig".into());
-    let mut build = Command::new(zig);
-    build
-        .arg("build")
-        .arg("-Demit-lib-vt=true")
-        .arg(format!("-Doptimize={optimize}"))
-        // Cargo artifacts may run on older CPUs than the build host. Without
-        // an explicit CPU model, Zig may emit host-specific instructions that
-        // make distributed binaries fail with an illegal instruction. Users
-        // building for a known machine can explicitly request `native` or a
-        // named Zig CPU model through LIBGHOSTTY_VT_SYS_CPU.
-        //
-        // For iOS builds this only affects the host-native flat artifacts:
-        // ghostty resolves its own per-platform targets for the xcframework
-        // slices, so -Dcpu does not leak into them.
-        .arg(format!("-Dcpu={cpu}"))
-        .arg(if ios_platform.is_some() {
-            "-Demit-xcframework=true"
-        } else {
-            "-Demit-xcframework=false"
-        })
-        .arg("-Dapp-runtime=none")
-        .arg("--prefix")
-        .arg(&install_prefix)
-        .arg("--cache-dir")
-        .arg(&zig_cache_dir)
-        .current_dir(&ghostty_dir);
-
-    // Package managers can provide Ghostty's Zig package cache ahead of time
-    // and ask Zig to resolve packages from that immutable store path instead
-    // of fetching during this Cargo build script. Those sandboxes usually
-    // have no writable home either, so the global cache goes under OUT_DIR.
-    // Zig 0.17 removed `--global-cache-dir`; the global cache can only be
-    // redirected through the environment now (as ghostty's own
-    // nix/build-support/update-mirror.nu does).
-    if let Ok(dir) = env::var("GHOSTTY_ZIG_SYSTEM_DIR") {
-        assert!(
-            !dir.is_empty(),
-            "GHOSTTY_ZIG_SYSTEM_DIR must not be empty when set"
-        );
-        let zig_system_dir = PathBuf::from(dir);
-        assert!(
-            zig_system_dir.exists(),
-            "GHOSTTY_ZIG_SYSTEM_DIR does not exist: {}",
-            zig_system_dir.display()
-        );
-        build
-            .arg("--system")
-            .arg(&zig_system_dir)
-            .env("ZIG_GLOBAL_CACHE_DIR", &zig_global_cache_dir);
-    }
-
-    // Pass -Dtarget only for non-iOS cross targets; native builds let zig
-    // auto-detect the host. iOS builds run host-native inside the xcframework
-    // emit, so they must not pass -Dtarget or a global --sysroot.
-    if target != host && ios_platform.is_none() {
-        let zig_target = zig_target(target);
-        build.arg(format!("-Dtarget={zig_target}"));
-    }
-
-    run(build, "zig build");
-
-    // The emit also installs host-native flat artifacts; replace them with the
-    // iOS library so the link emission below picks up the right arch.
-    if let Some(platform) = ios_platform {
-        extract_xcframework_lib(&install_prefix, platform);
-    }
-
-    let lib_dir = install_prefix.join("lib");
-    let search_dirs = library_search_dirs(target, &install_prefix);
-    if ios_platform.is_none() {
-        warn_unused_xcframework(&lib_dir);
-    }
-
-    let has_requested_library = search_dirs.iter().any(|dir| {
-        std::fs::read_dir(dir)
-            .unwrap_or_else(|error| panic!("failed to read {}: {error}", dir.display()))
-            .any(|entry| {
-                let entry = entry.unwrap_or_else(|error| {
-                    panic!("failed to read entry from {}: {error}", dir.display())
-                });
-                let file_name = entry.file_name();
-                let Some(file_name) = file_name.to_str() else {
-                    return false;
-                };
-
-                link_mode.matches_library(target, file_name)
-            })
-    });
-    assert!(
-        has_requested_library,
-        "expected libghostty-vt {} in one of {:?}",
-        link_mode.artifact_kind(),
-        search_dirs
-    );
-    assert!(
-        include_dir.join("ghostty").join("vt.h").exists(),
-        "expected header at {}",
-        include_dir.join("ghostty").join("vt.h").display()
-    );
-
-    for dir in &search_dirs {
-        println!("cargo:rustc-link-search=native={}", dir.display());
-    }
-    match link_mode {
-        LinkMode::Dynamic => println!("cargo:rustc-link-lib=dylib=ghostty-vt"),
-        LinkMode::Static => emit_static_link_lib(target),
-    }
-    emit_include_metadata(&[include_dir]);
-}
-
-/// Emit the link directive for the static archive.
-///
-/// Zig names static archives `<name>.lib` on every Windows ABI, so neither
-/// name rustc derives from a plain `static=ghostty-vt` finds the archive
-/// there: MSVC resolves it to `ghostty-vt.lib`, the DLL import library, which
-/// links but leaves a load-time dependency on `ghostty-vt.dll`; the GNU
-/// targets look for `libghostty-vt.a`, which no Windows build produces, and
-/// fail outright. Link the exact file name Ghostty installs instead, which
-/// `+verbatim` passes through to rustc's archive lookup untouched.
-fn emit_static_link_lib(target: &str) {
-    if target.contains("windows") {
-        println!("cargo:rustc-link-lib=static:+verbatim={WINDOWS_STATIC_LIB_FILE}");
-    } else {
-        println!("cargo:rustc-link-lib=static=ghostty-vt");
-    }
-}
-
-fn warn_unused_xcframework(lib_dir: &Path) {
-    let xcframework = lib_dir.join("ghostty-vt.xcframework");
-    if xcframework.exists() {
-        println!(
-            "cargo:warning=unused libghostty-vt XCFramework emitted at {}; Cargo links the dylib or archive directly",
-            xcframework.display()
-        );
-    }
-}
-
-#[cfg(feature = "pkg-config")]
-fn try_pkg_config(link_mode: LinkMode, target: &str) -> bool {
-    let mut config = pkg_config::Config::new();
-    let lib = match link_mode {
-        LinkMode::Dynamic => config.probe(link_mode.pkg_config_name()),
-        LinkMode::Static => config
-            .statik(true)
-            .cargo_metadata(false)
-            .probe(link_mode.pkg_config_name()),
-    };
-    let lib = match lib {
-        Ok(lib) => lib,
-        Err(_) => return false,
-    };
-
-    if let LinkMode::Static = link_mode {
-        emit_static_pkg_config_metadata(&lib, target);
-    }
-    emit_include_metadata(&lib.include_paths);
-    true
-}
-
-#[cfg(feature = "pkg-config")]
-fn emit_static_pkg_config_metadata(lib: &pkg_config::Library, target: &str) {
-    for path in &lib.link_paths {
-        println!("cargo:rustc-link-search=native={}", path.display());
-    }
-    for path in &lib.link_files {
-        if let Some(parent) = path.parent() {
-            println!("cargo:rustc-link-search=native={}", parent.display());
-        }
-    }
-    for path in &lib.framework_paths {
-        println!("cargo:rustc-link-search=framework={}", path.display());
-    }
-    for framework in &lib.frameworks {
-        println!("cargo:rustc-link-lib=framework={framework}");
-    }
-
-    emit_static_link_lib(target);
-    for library in &lib.libs {
-        if library != "ghostty-vt" {
-            println!("cargo:rustc-link-lib={library}");
-        }
-    }
-    for args in &lib.ld_args {
-        if !args.is_empty() {
-            println!("cargo:rustc-link-arg=-Wl,{}", args.join(","));
-        }
-    }
-}
-
-fn emit_include_metadata(include_paths: &[PathBuf]) {
-    if include_paths.is_empty() {
-        return;
-    }
-
-    let joined = env::join_paths(include_paths)
-        .unwrap_or_else(|error| panic!("failed to join include paths for cargo metadata: {error}"));
-    println!("cargo:include={}", joined.to_string_lossy());
-}
+include!("build_vendored.rs");
+include!("download.rs");
+include!("prebuilt.rs");
+include!("shared_build.rs");
+include!("link_emit.rs");
 
 /// Decide which Zig `OptimizeMode` to pass to `zig build`.
 ///

@@ -965,10 +965,50 @@ mod layout_0 {
     };
     #[allow(clippy::unnecessary_operation, clippy::identity_op)]
     const _: () = {
+        ["Size of KeyEncoderTerminalOptions"]
+            [::std::mem::size_of::<KeyEncoderTerminalOptions>() - 16usize];
+        ["Alignment of KeyEncoderTerminalOptions"]
+            [::std::mem::align_of::<KeyEncoderTerminalOptions>() - 8usize];
+        ["Offset of field: KeyEncoderTerminalOptions::size"]
+            [::std::mem::offset_of!(KeyEncoderTerminalOptions, size) - 0usize];
+        ["Offset of field: KeyEncoderTerminalOptions::cursor_key_application"]
+            [::std::mem::offset_of!(KeyEncoderTerminalOptions, cursor_key_application) - 8usize];
+        ["Offset of field: KeyEncoderTerminalOptions::keypad_key_application"]
+            [::std::mem::offset_of!(KeyEncoderTerminalOptions, keypad_key_application) - 9usize];
+        ["Offset of field: KeyEncoderTerminalOptions::ignore_keypad_with_numlock"][::std::mem::offset_of!(
+            KeyEncoderTerminalOptions,
+            ignore_keypad_with_numlock
+        ) - 10usize];
+        ["Offset of field: KeyEncoderTerminalOptions::alt_esc_prefix"]
+            [::std::mem::offset_of!(KeyEncoderTerminalOptions, alt_esc_prefix) - 11usize];
+        ["Offset of field: KeyEncoderTerminalOptions::modify_other_keys_state_2"][::std::mem::offset_of!(
+            KeyEncoderTerminalOptions,
+            modify_other_keys_state_2
+        ) - 12usize];
+        ["Offset of field: KeyEncoderTerminalOptions::kitty_flags"]
+            [::std::mem::offset_of!(KeyEncoderTerminalOptions, kitty_flags) - 13usize];
+        ["Offset of field: KeyEncoderTerminalOptions::backarrow_key_mode"]
+            [::std::mem::offset_of!(KeyEncoderTerminalOptions, backarrow_key_mode) - 14usize];
+    };
+    #[allow(clippy::unnecessary_operation, clippy::identity_op)]
+    const _: () = {
         ["Size of MousePosition"][::std::mem::size_of::<MousePosition>() - 8usize];
         ["Alignment of MousePosition"][::std::mem::align_of::<MousePosition>() - 4usize];
         ["Offset of field: MousePosition::x"][::std::mem::offset_of!(MousePosition, x) - 0usize];
         ["Offset of field: MousePosition::y"][::std::mem::offset_of!(MousePosition, y) - 4usize];
+    };
+    #[allow(clippy::unnecessary_operation, clippy::identity_op)]
+    const _: () = {
+        ["Size of MouseEncoderTerminalOptions"]
+            [::std::mem::size_of::<MouseEncoderTerminalOptions>() - 16usize];
+        ["Alignment of MouseEncoderTerminalOptions"]
+            [::std::mem::align_of::<MouseEncoderTerminalOptions>() - 8usize];
+        ["Offset of field: MouseEncoderTerminalOptions::size"]
+            [::std::mem::offset_of!(MouseEncoderTerminalOptions, size) - 0usize];
+        ["Offset of field: MouseEncoderTerminalOptions::event"]
+            [::std::mem::offset_of!(MouseEncoderTerminalOptions, event) - 8usize];
+        ["Offset of field: MouseEncoderTerminalOptions::format"]
+            [::std::mem::offset_of!(MouseEncoderTerminalOptions, format) - 12usize];
     };
     #[allow(clippy::unnecessary_operation, clippy::identity_op)]
     const _: () = {
@@ -1005,6 +1045,39 @@ mod layout_0 {
         ["Offset of field: Paste::reader"][::std::mem::offset_of!(Paste, reader) - 32usize];
         ["Offset of field: Paste::allow_unsafe"]
             [::std::mem::offset_of!(Paste, allow_unsafe) - 48usize];
+    };
+    #[allow(clippy::unnecessary_operation, clippy::identity_op)]
+    const _: () = {
+        ["Size of SnapshotCaptureOptions"]
+            [::std::mem::size_of::<SnapshotCaptureOptions>() - 24usize];
+        ["Alignment of SnapshotCaptureOptions"]
+            [::std::mem::align_of::<SnapshotCaptureOptions>() - 8usize];
+        ["Offset of field: SnapshotCaptureOptions::size"]
+            [::std::mem::offset_of!(SnapshotCaptureOptions, size) - 0usize];
+        ["Offset of field: SnapshotCaptureOptions::max_record_bytes"]
+            [::std::mem::offset_of!(SnapshotCaptureOptions, max_record_bytes) - 8usize];
+        ["Offset of field: SnapshotCaptureOptions::max_pages"]
+            [::std::mem::offset_of!(SnapshotCaptureOptions, max_pages) - 16usize];
+    };
+    #[allow(clippy::unnecessary_operation, clippy::identity_op)]
+    const _: () = {
+        ["Size of SnapshotCaptureEvent"][::std::mem::size_of::<SnapshotCaptureEvent>() - 48usize];
+        ["Alignment of SnapshotCaptureEvent"]
+            [::std::mem::align_of::<SnapshotCaptureEvent>() - 8usize];
+        ["Offset of field: SnapshotCaptureEvent::size"]
+            [::std::mem::offset_of!(SnapshotCaptureEvent, size) - 0usize];
+        ["Offset of field: SnapshotCaptureEvent::kind"]
+            [::std::mem::offset_of!(SnapshotCaptureEvent, kind) - 8usize];
+        ["Offset of field: SnapshotCaptureEvent::screen"]
+            [::std::mem::offset_of!(SnapshotCaptureEvent, screen) - 12usize];
+        ["Offset of field: SnapshotCaptureEvent::rows"]
+            [::std::mem::offset_of!(SnapshotCaptureEvent, rows) - 16usize];
+        ["Offset of field: SnapshotCaptureEvent::remaining"]
+            [::std::mem::offset_of!(SnapshotCaptureEvent, remaining) - 24usize];
+        ["Offset of field: SnapshotCaptureEvent::written"]
+            [::std::mem::offset_of!(SnapshotCaptureEvent, written) - 32usize];
+        ["Offset of field: SnapshotCaptureEvent::invalidation"]
+            [::std::mem::offset_of!(SnapshotCaptureEvent, invalidation) - 40usize];
     };
 }
 #[cfg(all(
@@ -1844,10 +1917,48 @@ mod layout_1 {
     };
     #[allow(clippy::unnecessary_operation, clippy::identity_op)]
     const _: () = {
+        ["Size of KeyEncoderTerminalOptions"]
+            [::std::mem::size_of::<KeyEncoderTerminalOptions>() - 12usize];
+        ["Alignment of KeyEncoderTerminalOptions"]
+            [::std::mem::align_of::<KeyEncoderTerminalOptions>() - 4usize];
+        ["Offset of field: KeyEncoderTerminalOptions::size"]
+            [::std::mem::offset_of!(KeyEncoderTerminalOptions, size) - 0usize];
+        ["Offset of field: KeyEncoderTerminalOptions::cursor_key_application"]
+            [::std::mem::offset_of!(KeyEncoderTerminalOptions, cursor_key_application) - 4usize];
+        ["Offset of field: KeyEncoderTerminalOptions::keypad_key_application"]
+            [::std::mem::offset_of!(KeyEncoderTerminalOptions, keypad_key_application) - 5usize];
+        ["Offset of field: KeyEncoderTerminalOptions::ignore_keypad_with_numlock"][::std::mem::offset_of!(
+            KeyEncoderTerminalOptions,
+            ignore_keypad_with_numlock
+        ) - 6usize];
+        ["Offset of field: KeyEncoderTerminalOptions::alt_esc_prefix"]
+            [::std::mem::offset_of!(KeyEncoderTerminalOptions, alt_esc_prefix) - 7usize];
+        ["Offset of field: KeyEncoderTerminalOptions::modify_other_keys_state_2"]
+            [::std::mem::offset_of!(KeyEncoderTerminalOptions, modify_other_keys_state_2) - 8usize];
+        ["Offset of field: KeyEncoderTerminalOptions::kitty_flags"]
+            [::std::mem::offset_of!(KeyEncoderTerminalOptions, kitty_flags) - 9usize];
+        ["Offset of field: KeyEncoderTerminalOptions::backarrow_key_mode"]
+            [::std::mem::offset_of!(KeyEncoderTerminalOptions, backarrow_key_mode) - 10usize];
+    };
+    #[allow(clippy::unnecessary_operation, clippy::identity_op)]
+    const _: () = {
         ["Size of MousePosition"][::std::mem::size_of::<MousePosition>() - 8usize];
         ["Alignment of MousePosition"][::std::mem::align_of::<MousePosition>() - 4usize];
         ["Offset of field: MousePosition::x"][::std::mem::offset_of!(MousePosition, x) - 0usize];
         ["Offset of field: MousePosition::y"][::std::mem::offset_of!(MousePosition, y) - 4usize];
+    };
+    #[allow(clippy::unnecessary_operation, clippy::identity_op)]
+    const _: () = {
+        ["Size of MouseEncoderTerminalOptions"]
+            [::std::mem::size_of::<MouseEncoderTerminalOptions>() - 12usize];
+        ["Alignment of MouseEncoderTerminalOptions"]
+            [::std::mem::align_of::<MouseEncoderTerminalOptions>() - 4usize];
+        ["Offset of field: MouseEncoderTerminalOptions::size"]
+            [::std::mem::offset_of!(MouseEncoderTerminalOptions, size) - 0usize];
+        ["Offset of field: MouseEncoderTerminalOptions::event"]
+            [::std::mem::offset_of!(MouseEncoderTerminalOptions, event) - 4usize];
+        ["Offset of field: MouseEncoderTerminalOptions::format"]
+            [::std::mem::offset_of!(MouseEncoderTerminalOptions, format) - 8usize];
     };
     #[allow(clippy::unnecessary_operation, clippy::identity_op)]
     const _: () = {
@@ -1884,5 +1995,38 @@ mod layout_1 {
         ["Offset of field: Paste::reader"][::std::mem::offset_of!(Paste, reader) - 20usize];
         ["Offset of field: Paste::allow_unsafe"]
             [::std::mem::offset_of!(Paste, allow_unsafe) - 28usize];
+    };
+    #[allow(clippy::unnecessary_operation, clippy::identity_op)]
+    const _: () = {
+        ["Size of SnapshotCaptureOptions"]
+            [::std::mem::size_of::<SnapshotCaptureOptions>() - 12usize];
+        ["Alignment of SnapshotCaptureOptions"]
+            [::std::mem::align_of::<SnapshotCaptureOptions>() - 4usize];
+        ["Offset of field: SnapshotCaptureOptions::size"]
+            [::std::mem::offset_of!(SnapshotCaptureOptions, size) - 0usize];
+        ["Offset of field: SnapshotCaptureOptions::max_record_bytes"]
+            [::std::mem::offset_of!(SnapshotCaptureOptions, max_record_bytes) - 4usize];
+        ["Offset of field: SnapshotCaptureOptions::max_pages"]
+            [::std::mem::offset_of!(SnapshotCaptureOptions, max_pages) - 8usize];
+    };
+    #[allow(clippy::unnecessary_operation, clippy::identity_op)]
+    const _: () = {
+        ["Size of SnapshotCaptureEvent"][::std::mem::size_of::<SnapshotCaptureEvent>() - 28usize];
+        ["Alignment of SnapshotCaptureEvent"]
+            [::std::mem::align_of::<SnapshotCaptureEvent>() - 4usize];
+        ["Offset of field: SnapshotCaptureEvent::size"]
+            [::std::mem::offset_of!(SnapshotCaptureEvent, size) - 0usize];
+        ["Offset of field: SnapshotCaptureEvent::kind"]
+            [::std::mem::offset_of!(SnapshotCaptureEvent, kind) - 4usize];
+        ["Offset of field: SnapshotCaptureEvent::screen"]
+            [::std::mem::offset_of!(SnapshotCaptureEvent, screen) - 8usize];
+        ["Offset of field: SnapshotCaptureEvent::rows"]
+            [::std::mem::offset_of!(SnapshotCaptureEvent, rows) - 12usize];
+        ["Offset of field: SnapshotCaptureEvent::remaining"]
+            [::std::mem::offset_of!(SnapshotCaptureEvent, remaining) - 16usize];
+        ["Offset of field: SnapshotCaptureEvent::written"]
+            [::std::mem::offset_of!(SnapshotCaptureEvent, written) - 20usize];
+        ["Offset of field: SnapshotCaptureEvent::invalidation"]
+            [::std::mem::offset_of!(SnapshotCaptureEvent, invalidation) - 24usize];
     };
 }

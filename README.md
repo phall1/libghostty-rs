@@ -74,18 +74,29 @@ used when all deployment machines support that target.
 The `pkg-config` path is opt-in. If you enable `libghostty-vt/pkg-config`
 (or `libghostty-vt-sys/pkg-config` for direct FFI use),
 the build will prefer an installed `libghostty-vt` discovered through
-`pkg-config` when `GHOSTTY_SOURCE_DIR` is unset. libghostty-vt is pre-1.0, so
+`pkg-config` when `GHOSTTY_SOURCE_DIR` is unset. This fork adds narrow C APIs, so
 the checked-in bindings are expected to move with the pinned Ghostty source and
 do not guarantee compatibility with arbitrary installed C API revisions. An
 explicit `GHOSTTY_SOURCE_DIR` always wins.
 
-Native Nix builds use `pkg-config`: Linux consumes upstream's pinned Nix
-package (substituted from Ghostty's binary cache when available), and macOS
-static builds use the matching release XCFramework with a pinned SHA-256.
-The default dev shell provides the same library for opt-in Cargo builds.
-The macOS dynamic-link check still builds upstream's Nix package because the
-XCFramework contains no shared library. Windows, Wasm, and the iOS vendored
-check continue to build from source.
+`LIBGHOSTTY_VT_SYS_LIB_DIR` can name a trusted prebuilt library directory,
+after the source override and before `pkg-config`. With nothing configured,
+the build can download matching release archives and verify their pinned
+SHA-256 before extraction. No archives are published for this migration yet;
+the empty checksum table therefore falls back to source. A failed download
+also falls back; a checksum mismatch is a hard error. Set
+`LIBGHOSTTY_VT_SYS_FROM_SOURCE=1` to disable downloads, or
+`LIBGHOSTTY_VT_SYS_PREBUILT_URL` to use a mirror.
+
+Source builds without an override share a locked per-user cache keyed by the
+engine commit, target, CPU, optimize mode, Zig binary and SDK environment.
+`LIBGHOSTTY_VT_SYS_CACHE_DIR` selects that cache; an empty value disables it.
+Local source overrides never reuse shared builds.
+
+Native Nix builds use `pkg-config` with the pinned fork's source package for
+both static and dynamic links. The vanilla 1.0 release archive does not contain
+this fork's extensions. Windows, Wasm, and the iOS vendored check also build
+from source.
 
 Downstream Nix source builds can prefetch the pinned Ghostty source and its
 Zig package dependencies, then set `GHOSTTY_SOURCE_DIR` and
@@ -95,6 +106,9 @@ By default, `libghostty-vt` and `libghostty-vt-sys` link `libghostty-vt.a`.
 This statically links the Ghostty VT archive, but the final binary may still
 depend on platform runtime libraries. To link the shared library instead,
 enable `libghostty-vt/link-dynamic`.
+Externally supplied shared libraries also need the platform's runtime loader
+path configured (for example, `DYLD_FALLBACK_LIBRARY_PATH` on macOS); Cargo
+does not automatically add library directories outside its target tree.
 
 ```sh
 nix develop

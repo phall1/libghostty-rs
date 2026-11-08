@@ -304,6 +304,18 @@ impl<'alloc: 'cb, 'cb> Terminal<'alloc, 'cb> {
         })
     }
 
+    /// Clear the active screen and history without feeding or resetting the VT
+    /// parser, preserving pending CSI/OSC/DCS/UTF-8 continuation and ownership.
+    ///
+    /// Applies CUP 1;1, ED 2, and ED 3 semantics (including existing origin,
+    /// margins, and protection), clears selection, and follows the live bottom.
+    /// Modes, rendition, title, and dimensions are preserved. No PTY writes or
+    /// stream effects are emitted. Borrowed grid references are invalidated.
+    pub fn clear_presentation(&mut self) {
+        // SAFETY: this wrapper exclusively owns a live terminal handle.
+        unsafe { ffi::ghostty_terminal_clear_presentation(self.inner.as_raw()) }
+    }
+
     /// Write VT-encoded data to the terminal for processing.
     ///
     /// Feeds raw bytes through the terminal's VT stream parser, updating

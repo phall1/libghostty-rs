@@ -73,6 +73,35 @@ impl<'t, 'alloc: 'cb, 'cb: 't> Formatter<'t, 'alloc, 'cb> {
         unsafe { Self::new_inner(std::ptr::null(), terminal) }
     }
 
+    /// Create a formatter restricted to a borrowed selection snapshot.
+    ///
+    /// Both endpoints must belong to this terminal's currently active screen.
+    /// Foreign-terminal and inactive-screen endpoints return
+    /// [`Error::InvalidValue`] before allocating a formatter. The shared borrow
+    /// prevents mutation from invalidating the checked snapshots.
+    pub fn new_with_selection(
+        terminal: &'t Terminal<'alloc, 'cb>,
+        selection: &Selection<'t>,
+    ) -> Result<Self> {
+        use crate::terminal::PointSpace;
+
+        for endpoint in [selection.start(), selection.end()] {
+            // Native point conversion walks the active page list and compares
+            // node identity. It does not dereference a foreign endpoint node.
+            if terminal
+                .point_from_grid_ref(&endpoint, PointSpace::History)?
+                .is_none()
+            {
+                return Err(Error::InvalidValue);
+            }
+        }
+        let mut formatter = Self::new(terminal)?;
+        // SAFETY: Both live endpoints were checked against the active page
+        // list above. The terminal cannot mutate while the formatter exists.
+        unsafe { formatter.set_selection(Some(selection)) }?;
+        Ok(formatter)
+    }
+
     /// Create a formatter for a terminal's active screen.
     ///
     /// See the [crate-level documentation](crate#memory-management-and-lifetimes)
@@ -412,6 +441,35 @@ pub enum Format {
 #[cfg(all(test, not(miri)))]
 mod tests {
     use super::*;
+
+    #[test]
+    fn explicit_selection_rejects_foreign_and_inactive_endpoints() {
+        use crate::terminal::{Point, PointCoordinate};
+        let point = Point::Active(PointCoordinate { x: 0, y: 0 });
+        let mut terminal = Terminal::new(10, 3).unwrap();
+        let other = Terminal::new(10, 3).unwrap();
+        let foreign = other.grid_ref(point).unwrap();
+        let primary = terminal.track_grid_ref(point).unwrap();
+        terminal.vt_write(b"\x1b[?1049h");
+        let inactive = primary.snapshot(&terminal).unwrap().unwrap();
+        let active = terminal.grid_ref(point).unwrap();
+        for (start, end) in [
+            (&foreign, &active),
+            (&active, &foreign),
+            (&inactive, &active),
+            (&active, &inactive),
+            (&foreign, &foreign),
+            (&inactive, &inactive),
+        ] {
+            let selection = Selection::new(start.clone(), end.clone(), false);
+            assert!(matches!(
+                Formatter::new_with_selection(&terminal, &selection),
+                Err(Error::InvalidValue)
+            ));
+        }
+        let selection = Selection::new(active.clone(), active, true);
+        assert!(Formatter::new_with_selection(&terminal, &selection).is_ok());
+    }
 
     /// A writer that accepts at most one byte per write, counting calls.
     struct ByteAtATime {
