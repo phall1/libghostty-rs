@@ -21,24 +21,9 @@ const PREBUILT_CPU: &str = "baseline";
 
 /// `(Rust target, SHA-256 of its archive)` for every archive in the release
 /// of `GHOSTTY_COMMIT`. The release workflow prints this table.
-const PREBUILT_ARCHIVES: &[(&str, &str)] = &[
-    (
-        "aarch64-apple-darwin",
-        "5e42d4b43c67c8c8830648180735ce48d6b403e4ed69462f0378380662e34bb2",
-    ),
-    (
-        "aarch64-unknown-linux-gnu",
-        "aced3c08b4bd6836bf44a2a228c88119d42204844fbb490b75582f8e3100575e",
-    ),
-    (
-        "x86_64-apple-darwin",
-        "fbb7c6780305974e7c8fca5537a3735ef876249818ff0c0413d6b5ab1dd224a8",
-    ),
-    (
-        "x86_64-unknown-linux-gnu",
-        "2e6797f1d30974cc0172c72aab6c25ce6d0f17df8c36547803807ae5aeab73ba",
-    ),
-];
+// No archives are published for the correctness-backport pin yet. Never
+// associate the previous pin's archive digests with a different engine.
+const PREBUILT_ARCHIVES: &[(&str, &str)] = &[];
 
 /// The release tag: the Ghostty commit and the build flavor.
 fn prebuilt_tag() -> String {
