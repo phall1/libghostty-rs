@@ -20,7 +20,7 @@
     };
     ghostty = {
       # vt-1.0.0 plus the narrow phux APIs; keep in sync with build.rs.
-      url = "github:phall1/ghostty/511a1fabb48ab00715cdb22ce13a7191217e8086";
+      url = "github:phall1/ghostty/a444c2d318dcc954ebf78ab6aab30c7dea05392e";
     };
   };
 

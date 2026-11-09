@@ -562,13 +562,15 @@ pub struct FeedProgress {
     /// Rows authenticated from the staged PAGE header.
     ///
     /// This is the wire outcome callers should compare with protocol metadata.
-    /// It is independent of local history limits and remains nonzero when the
-    /// authenticated page is intentionally discarded by local projection.
+    /// It is independent of local history limits or live terminal changes and
+    /// remains nonzero when the authenticated page is intentionally discarded,
+    /// including after a live reset or scrollback clear.
     /// Image payloads report zero rows; inspect [`Self::kind`] to distinguish
     /// them from pages that were consumed but not retained.
     pub authenticated_rows: usize,
-    /// Rows retained in the live terminal, or zero when local limits discard
-    /// the authenticated page.
+    /// Rows retained in the live terminal, or zero when local history limits,
+    /// an incompatible resize, or a live reset/scrollback clear discard the
+    /// authenticated page. Discarded pages still advance authenticated progress.
     pub rows: usize,
     /// Pages remaining in this screen's HISTORY sequence, or zero for images.
     pub remaining: u32,
@@ -630,7 +632,9 @@ impl<'alloc: 'cb, 'cb> FeedIncrementalDecoder<'alloc, 'cb> {
     /// Image payloads require zero expected rows and report their own kind.
     /// Successful PAGE results report the same count in
     /// [`FeedProgress::authenticated_rows`], while [`FeedProgress::rows`] may
-    /// be zero when local history limits decline to retain those rows.
+    /// be zero when local limits or live terminal changes (including reset or
+    /// scrollback clear) prevent retaining those rows. Discarding a page does
+    /// not skip authentication or change the expected wire row count.
     pub fn next_checked(&mut self, expected_rows: usize) -> Result<Option<FeedProgress>> {
         self.next_inner(Some(expected_rows))
     }
@@ -1045,16 +1049,55 @@ mod feed_tests {
                 feed.feed(&unit).unwrap();
                 let progress = feed.next_checked(rows).unwrap().unwrap();
                 assert_eq!(progress.authenticated_rows, rows);
-                if reset {
-                    // A reset need not replace the screen's identity. Keep
-                    // upstream's decision to retain or drop a compatible page.
-                    assert!(progress.rows == 0 || progress.rows == rows);
-                } else {
-                    assert_eq!(progress.rows, 0);
-                }
+                assert_eq!(progress.rows, 0);
             }
             feed.feed(&captured.finish).unwrap();
             assert!(feed.next_checked(0).unwrap().is_none());
+        }
+    }
+
+    #[test]
+    fn staged_feed_authenticates_but_discards_history_after_live_scrollback_clear() {
+        for pages_before_clear in [0, 1] {
+            let mut source = source_terminal();
+            let captured = capture(&mut source).unwrap();
+            assert!(captured.history.len() > pages_before_clear);
+            // With zero pages applied, CSI 3 J precedes even the first HISTORY
+            // manifest. The cut must be anchored at READY, not at that manifest.
+            assert_eq!(
+                staged_record(&captured.history[0].0, 0).unwrap().0,
+                RECORD_TAG_HISTORY
+            );
+            let mut feed = FeedDecoder::new(captured.bytes.len()).unwrap();
+            feed.feed(&captured.ready).unwrap();
+            let mut feed = feed.ready().unwrap();
+            for (unit, _, rows, _) in &captured.history[..pages_before_clear] {
+                feed.feed(unit).unwrap();
+                assert_eq!(feed.next_checked(*rows).unwrap().unwrap().rows, *rows);
+            }
+            feed.terminal_mut().vt_write(b"\x1b[3J");
+            assert_eq!(feed.terminal().scrollback_rows().unwrap(), 0);
+            for (unit, screen, rows, remaining) in &captured.history[pages_before_clear..] {
+                feed.feed(unit).unwrap();
+                let progress = feed.next_checked(*rows).unwrap().unwrap();
+                assert_eq!(progress.authenticated_rows, *rows);
+                assert_eq!(progress.screen, *screen);
+                assert_eq!(progress.rows, 0);
+                assert_eq!(progress.remaining, *remaining);
+                assert_eq!(
+                    progress.kind,
+                    ProgressKind::Page {
+                        rows: 0,
+                        remaining: *remaining
+                    }
+                );
+                assert_eq!(feed.terminal().scrollback_rows().unwrap(), 0);
+                assert_eq!(feed.staged_capacity_bytes(), 0);
+            }
+            feed.feed(&captured.finish).unwrap();
+            assert!(feed.next_checked(0).unwrap().is_none());
+            assert_eq!(feed.terminal().scrollback_rows().unwrap(), 0);
+            assert_eq!(feed.staged_capacity_bytes(), 0);
         }
     }
 
