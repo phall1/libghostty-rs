@@ -47,7 +47,7 @@
 //!
 //! - [Render State](crate::render) - Find out what changed since the last frame
 //!   and read the rows and cells to draw
-//! - [Kitty Graphics](crate::kitty::graphics) - 	Read the images that programs
+//! - [Kitty Graphics](crate::kitty::graphics) -     Read the images that programs
 //!   send with the Kitty graphics protocol
 //!
 //! ## Input
@@ -57,7 +57,7 @@
 //! - [Keys](crate::key) - Encode key events with the legacy encoding or the
 //!   Kitty keyboard protocol
 //! - [Mouse](crate::mouse) - Encode mouse events with the X10, UTF-8, SGR,
-//!   URxvt, or SGR-Pixels protocols.
+//!   `URxvt`, or SGR-Pixels protocols.
 //! - [Focus](crate::focus) - Encode focus gained and lost events, for mode 1004
 //! - [Paste](crate::paste) - Paste into a terminal, and check paste data for
 //!   unsafe content
@@ -82,7 +82,7 @@
 //! - [Error Handling](crate::error)
 //! - [Build Info](crate::build_info) - Find out how this copy of the library
 //!   was built and which features it has
-//! - [Allocators](crate::alloc) - 	Run the library on your own memory allocator
+//! - [Allocators](crate::alloc) -     Run the library on your own memory allocator
 //! - [System Interface](crate::sys) - Plug in your own system functions, such
 //!   as a PNG decoder
 #![doc(
@@ -103,6 +103,13 @@
     clippy::missing_errors_doc,
     reason = "underlying C API may return any error outside of expected and
     mitigated situations, and it is not feasible to document them all"
+)]
+#![cfg_attr(
+    test,
+    expect(
+        clippy::assert_is_empty,
+        reason = "assert!(x.is_empty()) reads better in tests than assert_eq! against a typed empty array"
+    )
 )]
 #![cfg_attr(docsrs, feature(doc_cfg))]
 

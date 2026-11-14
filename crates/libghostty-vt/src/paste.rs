@@ -114,7 +114,7 @@ use crate::{
 };
 
 // Ref'd in docs only
-#[expect(unused)]
+#[cfg(doc)]
 use crate::mode::Mode;
 
 /// Check if paste data is safe to paste into the terminal.
