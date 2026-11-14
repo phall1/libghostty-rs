@@ -14,16 +14,19 @@
 /// `<base>/<tag>/<asset>` either way.
 const PREBUILT_BASE_URL: &str = "https://github.com/phall1/libghostty-rs/releases/download";
 
-/// The build flavor any future published archives must match.
+/// The build flavor the published archives were built with.
 const PREBUILT_OPTIMIZE: &str = "ReleaseFast";
 const PREBUILT_CPU: &str = "baseline";
 
 /// `(Rust target, SHA-256 of its archive)` for every archive in the release
-/// of `GHOSTTY_COMMIT`.
-// No archives have been published for this migration. Never reuse checksums
-// from the old engine: its ABI is different. Source fallback remains available
-// until a separately authorized release supplies this pin's verified hashes.
-const PREBUILT_ARCHIVES: &[(&str, &str)] = &[];
+/// of `GHOSTTY_COMMIT` (ghostty-vt-26a7ae83a22b-releasefast-baseline, built
+/// with Zig 0.17.1 by .github/workflows/prebuilt.yml).
+const PREBUILT_ARCHIVES: &[(&str, &str)] = &[
+    ("aarch64-apple-darwin", "0600cc820a5787574f9153aeac5eb6491dbe18c0948bd80f6aa34c5af02225d7"),
+    ("aarch64-unknown-linux-gnu", "2c700820a990126374043f7cb9bc9d089ca6b8615ef28ed5a3139768aef31593"),
+    ("x86_64-apple-darwin", "030e716ce03c6591ff0fa613cf896b96e5a1c2686fea68d2f07fcceaf0f47ad2"),
+    ("x86_64-unknown-linux-gnu", "c1352d2cf6b3dd7a82c94592ca8c72ac25593c126480d4dd91043707ada3fd8b"),
+];
 
 /// The release tag: the Ghostty commit and the build flavor.
 fn prebuilt_tag() -> String {
