@@ -2,9 +2,9 @@
 
 use libghostty_vt::{
     Terminal,
-    snapshot::Decoder,
     color::PaletteIndex,
     point::{Coordinate as PointCoordinate, Point},
+    snapshot::Decoder,
     style::StyleColor,
 };
 use std::cell::RefCell;
