@@ -2,7 +2,7 @@ name: CI
 
 on:
   push:
-    branches: [master, "release/**"]
+    branches: [master, "release/**", "feat/phux-vt-1"]
   pull_request:
     # `edited` covers a retargeted base, which happens to every stacked PR
     # once the one below it merges.
@@ -22,32 +22,16 @@ jobs:
       matrix:
         include:
           - name: macOS aarch64
-            runner: namespace-profile-libghostty-mac
+            runner: macos-15
             flake_check: true
           - name: Linux aarch64
-            runner: namespace-profile-linux-aarch64-sm
+            runner: ubuntu-24.04-arm
             flake_check: true
           - name: Linux x86_64
-            runner: namespace-profile-linux-x86-sm
+            runner: ubuntu-24.04
             flake_check: true
     steps:
       - uses: actions/checkout@v4
-
-      - name: Setup Namespace cache
-        uses: namespacelabs/nscloud-cache-action@15799a6b54e5765f85b2aac25b3f0df43ed571c0 # v1.4.3
-        if: runner.os == 'Linux'
-        with:
-          cache: |
-            nix
-            rust
-
-      - name: Setup Namespace cache
-        uses: namespacelabs/nscloud-cache-action@15799a6b54e5765f85b2aac25b3f0df43ed571c0 # v1.4.3
-        if: runner.os == 'macOS'
-        with:
-          cache: |
-            xcode
-            rust
 
       - name: Install Nix
         uses: cachix/install-nix-action@8aa03977d8d733052d78f4e008a241fd1dbf36b3 # v31.10.6
@@ -109,16 +93,9 @@ jobs:
 
   miri:
     name: Linux Miri
-    runs-on: namespace-profile-linux-x86-sm
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
-
-      - name: Setup Namespace cache
-        uses: namespacelabs/nscloud-cache-action@15799a6b54e5765f85b2aac25b3f0df43ed571c0 # v1.4.3
-        with:
-          cache: |
-            nix
-            rust
 
       - name: Install Nix
         uses: cachix/install-nix-action@8aa03977d8d733052d78f4e008a241fd1dbf36b3 # v31.10.6
