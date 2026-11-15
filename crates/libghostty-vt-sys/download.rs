@@ -19,9 +19,14 @@ const PREBUILT_OPTIMIZE: &str = "ReleaseFast";
 const PREBUILT_CPU: &str = "baseline";
 
 /// `(Rust target, SHA-256 of its archive)` for every archive in the release
-/// of `GHOSTTY_COMMIT`. Empty until .github/workflows/prebuilt.yml publishes
-/// this pin; never reuse an older engine's checksums.
-const PREBUILT_ARCHIVES: &[(&str, &str)] = &[];
+/// of `GHOSTTY_COMMIT` (ghostty-vt-e82b76e98a26-releasefast-baseline, built
+/// with Zig 0.17.1 by .github/workflows/prebuilt.yml).
+const PREBUILT_ARCHIVES: &[(&str, &str)] = &[
+    ("aarch64-apple-darwin", "47e22974ca9cc41f810ce53d75c8898390a7b5595c72fc6f1ac87fc26b6bfb38"),
+    ("aarch64-unknown-linux-gnu", "5617bf8f50216c7c680732a67f6a17c1f32f5f5f77916c42a7933a29bdf1e6f8"),
+    ("x86_64-apple-darwin", "03b113ba787c2671169533590998485ead560c26d7e3bdb99d5895216ee3ce58"),
+    ("x86_64-unknown-linux-gnu", "502982f12789456abaf34835272260c66ed90f3d4a891bb0f65d6e0c1892f291"),
+];
 
 /// The release tag: the Ghostty commit and the build flavor.
 fn prebuilt_tag() -> String {
