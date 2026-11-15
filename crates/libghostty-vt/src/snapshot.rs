@@ -176,16 +176,25 @@ impl FeedReader {
     }
 
     fn feed(&mut self, bytes: &[u8]) -> Result<()> {
-        let Some(total) = self.bytes.len().checked_add(bytes.len()) else {
+        self.feed_parts(bytes, &[])
+    }
+
+    fn feed_parts(&mut self, first: &[u8], second: &[u8]) -> Result<()> {
+        let additional = first
+            .len()
+            .checked_add(second.len())
+            .ok_or(Error::LimitExceeded)?;
+        let Some(total) = self.bytes.len().checked_add(additional) else {
             return Err(Error::LimitExceeded);
         };
         if total > self.max_bytes {
             return Err(Error::LimitExceeded);
         }
         self.bytes
-            .try_reserve(bytes.len())
+            .try_reserve(additional)
             .map_err(|_| Error::OutOfMemory)?;
-        self.bytes.extend_from_slice(bytes);
+        self.bytes.extend_from_slice(first);
+        self.bytes.extend_from_slice(second);
         Ok(())
     }
 
@@ -241,6 +250,13 @@ impl FeedCore<'_> {
             return Err(Error::InvalidValue);
         }
         self.source.feed(bytes)
+    }
+
+    fn feed_parts(&mut self, first: &[u8], second: &[u8]) -> Result<()> {
+        if self.failed {
+            return Err(Error::InvalidValue);
+        }
+        self.source.feed_parts(first, second)
     }
 
     fn complete_operation(&mut self, result: ffi::Result::Type) -> Result<()> {
@@ -406,10 +422,19 @@ pub struct FeedIncrementalDecoder<'alloc, 'cb> {
 impl<'alloc: 'cb, 'cb> FeedIncrementalDecoder<'alloc, 'cb> {
     /// Append bounded input for subsequent decoding operations.
     pub fn feed(&mut self, bytes: &[u8]) -> Result<&mut Self> {
+        self.feed_parts(bytes, &[])
+    }
+
+    /// Append two adjacent input slices with one combined capacity reservation.
+    ///
+    /// Both slices count against the staging limit. Rejection leaves existing
+    /// staged input unchanged, and a short suffix does not double a fresh
+    /// payload buffer merely because it is appended separately.
+    pub fn feed_parts(&mut self, first: &[u8], second: &[u8]) -> Result<&mut Self> {
         if self.finished {
             return Err(Error::InvalidValue);
         }
-        self.core.feed(bytes)?;
+        self.core.feed_parts(first, second)?;
         Ok(self)
     }
 
@@ -513,6 +538,40 @@ impl<'alloc: 'cb, 'cb> FeedIncrementalDecoder<'alloc, 'cb> {
         let Self { core, terminal, .. } = self;
         drop(core);
         terminal
+    }
+}
+
+#[cfg(test)]
+mod feed_reader_tests {
+    use super::*;
+
+    #[test]
+    fn adjacent_parts_reserve_the_complete_unit_once() {
+        let payload = [0_u8; 4096];
+        let suffix = [1_u8; 16];
+        let size = payload.len() + suffix.len();
+        let mut reader = FeedReader::new(size).unwrap();
+        reader.feed_parts(&payload, &suffix).unwrap();
+        assert_eq!(reader.bytes.len(), size);
+        assert!(
+            reader.bytes.capacity() <= size,
+            "a short suffix must not double staging"
+        );
+        assert_eq!(&reader.bytes[..payload.len()], payload.as_slice());
+        assert_eq!(&reader.bytes[payload.len()..], suffix.as_slice());
+    }
+
+    #[test]
+    fn combined_limit_rejection_does_not_append_either_part() {
+        let mut reader = FeedReader::new(5).unwrap();
+        reader.feed(b"x").unwrap();
+        let capacity = reader.bytes.capacity();
+        assert!(matches!(
+            reader.feed_parts(b"12", b"345"),
+            Err(Error::LimitExceeded)
+        ));
+        assert_eq!(reader.bytes, b"x");
+        assert_eq!(reader.bytes.capacity(), capacity);
     }
 }
 

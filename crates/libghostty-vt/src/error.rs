@@ -75,6 +75,7 @@ pub(crate) fn from_optional_result_uninit<T>(
         ffi::Result::OUT_OF_MEMORY => Err(Error::OutOfMemory),
         ffi::Result::OUT_OF_SPACE => Err(Error::OutOfSpace { required: 0 }),
         ffi::Result::NO_VALUE => Ok(None),
+        ffi::Result::INVALID_VALUE => Err(Error::InvalidValue),
         ffi::Result::IO_ERROR => Err(Error::IoError),
         ffi::Result::REJECTED => Err(Error::Rejected),
         ffi::Result::LIMIT_EXCEEDED => Err(Error::LimitExceeded),
@@ -89,6 +90,7 @@ pub(crate) fn from_optional_result<T>(code: ffi::Result::Type, v: T) -> Result<O
         ffi::Result::OUT_OF_MEMORY => Err(Error::OutOfMemory),
         ffi::Result::OUT_OF_SPACE => Err(Error::OutOfSpace { required: 0 }),
         ffi::Result::NO_VALUE => Ok(None),
+        ffi::Result::INVALID_VALUE => Err(Error::InvalidValue),
         ffi::Result::IO_ERROR => Err(Error::IoError),
         ffi::Result::REJECTED => Err(Error::Rejected),
         ffi::Result::LIMIT_EXCEEDED => Err(Error::LimitExceeded),
@@ -101,6 +103,7 @@ pub(crate) fn from_result_with_len(code: ffi::Result::Type, len: usize) -> Resul
         ffi::Result::SUCCESS => Ok(len),
         ffi::Result::OUT_OF_MEMORY => Err(Error::OutOfMemory),
         ffi::Result::OUT_OF_SPACE => Err(Error::OutOfSpace { required: len }),
+        ffi::Result::INVALID_VALUE => Err(Error::InvalidValue),
         ffi::Result::IO_ERROR => Err(Error::IoError),
         ffi::Result::REJECTED => Err(Error::Rejected),
         ffi::Result::LIMIT_EXCEEDED => Err(Error::LimitExceeded),
@@ -117,9 +120,61 @@ pub(crate) fn from_optional_result_with_len(
         ffi::Result::OUT_OF_MEMORY => Err(Error::OutOfMemory),
         ffi::Result::OUT_OF_SPACE => Err(Error::OutOfSpace { required: len }),
         ffi::Result::NO_VALUE => Ok(None),
+        ffi::Result::INVALID_VALUE => Err(Error::InvalidValue),
         ffi::Result::IO_ERROR => Err(Error::IoError),
         ffi::Result::REJECTED => Err(Error::Rejected),
         ffi::Result::LIMIT_EXCEEDED => Err(Error::LimitExceeded),
         _ => Err(Error::Unsupported),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn invalid_values_remain_distinct_from_unsupported_operations() {
+        for code in [ffi::Result::INVALID_VALUE, ffi::Result::UNSUPPORTED] {
+            let results = [
+                from_result(code).err().unwrap(),
+                from_optional_result(code, ()).err().unwrap(),
+                from_optional_result_uninit::<u8>(code, MaybeUninit::uninit())
+                    .err()
+                    .unwrap(),
+                from_result_with_len(code, 17).err().unwrap(),
+                from_optional_result_with_len(code, 17).err().unwrap(),
+            ];
+            for result in results {
+                assert!(matches!(
+                    (code, result),
+                    (ffi::Result::INVALID_VALUE, Error::InvalidValue)
+                        | (ffi::Result::UNSUPPORTED, Error::Unsupported)
+                ));
+            }
+        }
+    }
+
+    #[test]
+    fn absent_optional_values_and_required_buffer_sizes_are_preserved() {
+        assert!(matches!(
+            from_optional_result(ffi::Result::NO_VALUE, ()),
+            Ok(None)
+        ));
+        assert!(matches!(
+            from_optional_result_uninit::<u8>(ffi::Result::NO_VALUE, MaybeUninit::uninit()),
+            Ok(None)
+        ));
+        assert!(matches!(
+            from_optional_result_with_len(ffi::Result::NO_VALUE, 17),
+            Ok(None)
+        ));
+        assert!(matches!(
+            from_result_with_len(ffi::Result::OUT_OF_SPACE, 17),
+            Err(Error::OutOfSpace { required: 17 })
+        ));
+        assert!(matches!(
+            from_optional_result_with_len(ffi::Result::OUT_OF_SPACE, 17),
+            Err(Error::OutOfSpace { required: 17 })
+        ));
     }
 }

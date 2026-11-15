@@ -20,7 +20,7 @@
     };
     ghostty = {
       # Pinned engine and native API fixes; keep in sync with build.rs.
-      url = "github:phall1/ghostty/60a2d702a8104cd5aca17da523e454a56e70f208";
+      url = "github:phall1/ghostty/ce42b4c3df8d206092d55d7add0a4f15ac29a0a2";
     };
   };
 
@@ -99,6 +99,8 @@
           text = ''
             cargo miri test --locked -p libghostty-vt-sys --lib
             cargo miri test --locked -p libghostty-vt --lib alloc::tests::
+            cargo miri test --locked -p libghostty-vt --lib error::tests::
+            cargo miri test --locked -p libghostty-vt --lib feed_reader_tests
             # Issue #74 soundness regression tests (both clipboard findings
             # live in this module), plus tests that need the mock C API to
             # produce shapes real libghostty can't yet. Miri aborts the test
