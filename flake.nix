@@ -20,7 +20,7 @@
     };
     ghostty = {
       # Pinned engine and native API fixes; keep in sync with build.rs.
-      url = "github:phall1/ghostty/e82b76e98a2609bf093adc5a9d9bc0adfc0f9c4a";
+      url = "github:phall1/ghostty/60a2d702a8104cd5aca17da523e454a56e70f208";
     };
   };
 

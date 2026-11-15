@@ -75,17 +75,17 @@
         "zon2nix": "zon2nix"
       },
       "locked": {
-        "lastModified": 1794697426,
-        "narHash": "sha256-H4jZSnlM2yvisLTzuBrFhnzAZUn93nRa7SMqxX2dIhM=",
+        "lastModified": 1794760496,
+        "narHash": "sha256-ifw018fLpVYHZbD86jSwFrvLZPjV4o8uhRkVjRD0O5A=",
         "owner": "phall1",
         "repo": "ghostty",
-        "rev": "e82b76e98a2609bf093adc5a9d9bc0adfc0f9c4a",
+        "rev": "60a2d702a8104cd5aca17da523e454a56e70f208",
         "type": "github"
       },
       "original": {
         "owner": "phall1",
         "repo": "ghostty",
-        "rev": "e82b76e98a2609bf093adc5a9d9bc0adfc0f9c4a",
+        "rev": "60a2d702a8104cd5aca17da523e454a56e70f208",
         "type": "github"
       }
     },
