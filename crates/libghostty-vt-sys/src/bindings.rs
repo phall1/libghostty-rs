@@ -171,6 +171,13 @@ pub struct KittyGraphicsImageImpl {
 pub type KittyGraphicsImage = *const KittyGraphicsImageImpl;
 #[repr(C)]
 #[derive(Debug, Copy, Clone)]
+pub struct KittyGraphicsImageIteratorImpl {
+    _unused: [u8; 0],
+}
+#[doc = " Opaque iterator over all stored Kitty graphics images, including images\n without placements. See ghostty_kitty_graphics_image_iterator_new().\n"]
+pub type KittyGraphicsImageIterator = *mut KittyGraphicsImageIteratorImpl;
+#[repr(C)]
+#[derive(Debug, Copy, Clone)]
 pub struct KittyGraphicsPlacementIteratorImpl {
     _unused: [u8; 0],
 }
@@ -1760,7 +1767,9 @@ pub mod KittyGraphicsData {
     pub const PLACEMENT_ITERATOR: Type = 1;
     #[doc = " A value that changes whenever a program sends, replaces, places or\n deletes an image. It is 0 if nothing has changed the storage yet,\n which means the storage is empty.\n\n If the value matches the last one you read, the storage holds the\n same images and placements as before. The placements may still have\n moved on screen, because scrolling and resizing move them without\n changing the storage. So this value can't tell you when to read the\n render state's image list again. For that, use\n GHOSTTY_RENDER_STATE_DATA_IMAGE_PLACEMENTS_GENERATION. See\n\n A value is never reused, not even by another screen, after a reset,\n or by another terminal. You can use it as a cache key on its own.\n\n Output type: uint64_t *"]
     pub const GENERATION: Type = 2;
-    #[doc = " A value that changes whenever a program sends, replaces, places or\n deletes an image. It is 0 if nothing has changed the storage yet,\n which means the storage is empty.\n\n If the value matches the last one you read, the storage holds the\n same images and placements as before. The placements may still have\n moved on screen, because scrolling and resizing move them without\n changing the storage. So this value can't tell you when to read the\n render state's image list again. For that, use\n GHOSTTY_RENDER_STATE_DATA_IMAGE_PLACEMENTS_GENERATION. See\n\n A value is never reused, not even by another screen, after a reset,\n or by another terminal. You can use it as a cache key on its own.\n\n Output type: uint64_t *"]
+    #[doc = " Populate a pre-allocated image iterator with every stored image, including\n images without placements. Iteration order is unspecified. The iterator\n and returned image handles are invalidated by terminal mutation.\n\n Output type: GhosttyKittyGraphicsImageIterator *"]
+    pub const IMAGE_ITERATOR: Type = 3;
+    #[doc = " Populate a pre-allocated image iterator with every stored image, including\n images without placements. Iteration order is unspecified. The iterator\n and returned image handles are invalidated by terminal mutation.\n\n Output type: GhosttyKittyGraphicsImageIterator *"]
     pub const MAX_VALUE: Type = 2147483647;
 }
 pub mod KittyGraphicsPlacementData {
@@ -1890,13 +1899,26 @@ unsafe extern "C" {
     ) -> Result::Type;
 }
 unsafe extern "C" {
-    #[doc = " Copy all resident image IDs, including unplaced images, without allocating.\n An undersized buffer returns GHOSTTY_OUT_OF_SPACE, sets out_len to the\n required capacity, and writes no IDs. NULL with zero capacity queries size.\n The order is unspecified. Do not mutate the terminal between query and copy.\n Without Kitty graphics, returns GHOSTTY_NO_VALUE and sets out_len to zero."]
-    pub fn ghostty_kitty_graphics_image_ids(
-        graphics: KittyGraphics,
-        ids: *mut u32,
-        capacity: usize,
-        out_len: *mut usize,
+    #[doc = " Allocate an image iterator. Populate it with ghostty_kitty_graphics_get()\n using GHOSTTY_KITTY_GRAPHICS_DATA_IMAGE_ITERATOR before iterating.\n NULL allocator selects the default allocator. NULL out_iterator returns\n GHOSTTY_INVALID_VALUE. Disabled Kitty graphics returns GHOSTTY_UNSUPPORTED.\n"]
+    pub fn ghostty_kitty_graphics_image_iterator_new(
+        allocator: *const Allocator,
+        out_iterator: *mut KittyGraphicsImageIterator,
     ) -> Result::Type;
+}
+unsafe extern "C" {
+    #[doc = " Free an image iterator. NULL is a no-op. @ingroup kitty_graphics"]
+    pub fn ghostty_kitty_graphics_image_iterator_free(iterator: KittyGraphicsImageIterator);
+}
+unsafe extern "C" {
+    #[doc = " Advance to the next image. Returns false before population, at the end,\n for NULL, or when Kitty graphics are disabled.\n"]
+    pub fn ghostty_kitty_graphics_image_iterator_next(iterator: KittyGraphicsImageIterator)
+    -> bool;
+}
+unsafe extern "C" {
+    #[doc = " Return the current borrowed image handle. Read its fields with\n ghostty_kitty_graphics_image_get(). Returns NULL before successful next,\n after exhaustion, for NULL, or when Kitty graphics are disabled.\n Terminal mutation invalidates the handle.\n"]
+    pub fn ghostty_kitty_graphics_image_iterator_get_image(
+        iterator: KittyGraphicsImageIterator,
+    ) -> KittyGraphicsImage;
 }
 unsafe extern "C" {
     #[doc = " Advance playing animations and get the time of the next frame.\n\n Every playing animation moves to the frame that is due at `now_ms`.\n An animation moves forward at most one frame per call. If calls\n arrive late, playback slows down rather than skipping frames.\n\n Images that moved to a new frame get a new\n\n Time is measured in milliseconds on a clock you choose, such as the\n time since your application started. The clock must only move\n forward, and you must keep using the same clock with the same\n starting point for as long as the terminal exists. The time written\n to `next_ms` uses the same clock.\n\n This call changes the image storage. Like ghostty_terminal_vt_write(),\n it invalidates any @ref GhosttyKittyGraphicsImage handles and image\n data pointers you are holding, so look images up again afterwards.\n The @ref GhosttyKittyGraphics handle itself stays valid.\n\n Call this once each time you prepare a frame to draw, not in a loop.\n schedule redraws with the returned time and includes an example.\n\n   milliseconds on the same clock as `now_ms`. Only written when the\n   function returns GHOSTTY_SUCCESS.\n   set, GHOSTTY_NO_VALUE if nothing is playing, GHOSTTY_UNSUPPORTED if\n   Kitty graphics are disabled at build time, GHOSTTY_INVALID_VALUE if\n   `next_ms` is NULL\n"]
@@ -3078,10 +3100,6 @@ unsafe extern "C" {
 unsafe extern "C" {
     #[doc = " Perform a full reset of the terminal (RIS).\n\n Resets all terminal state back to its initial configuration, including\n modes, scrollback, scrolling region, and screen contents. The terminal\n dimensions are preserved.\n\n If synchronized output was enabled, the GHOSTTY_TERMINAL_OPT_RENDER_HOLD\n callback is invoked to report that the hold ended.\n\n"]
     pub fn ghostty_terminal_reset(terminal: Terminal);
-}
-unsafe extern "C" {
-    #[doc = " Clear the active presentation without consuming or resetting the VT parser.\n\n Performs the terminal operations of CUP 1;1, ED 2, and ED 3 directly, then\n clears selection and follows the bottom viewport. Existing origin/margin\n and erase-protection semantics apply, just as for those control sequences.\n Preserves pending VT/UTF-8 continuation, modes, rendition, title, dimensions,\n and terminal ownership. Does not emit PTY writes or other stream effects.\n Borrowed grid references are invalidated as with any terminal mutation.\n NULL is a no-op.\n\n"]
-    pub fn ghostty_terminal_clear_presentation(terminal: Terminal);
 }
 unsafe extern "C" {
     #[doc = " Resize the terminal to the given dimensions.\n\n Changes the number of columns and rows in the terminal. The primary\n screen will reflow content if wraparound mode is enabled; the alternate\n screen does not reflow. If the dimensions are unchanged, the grid is\n left as is, but everything below still applies.\n\n This also updates the terminal's pixel dimensions (used for image\n protocols and size reports), disables synchronized output mode (allowed\n by the spec so that resize results are shown immediately), and sends an\n in-band size report if mode 2048 is enabled.\n\n If synchronized output was enabled, the GHOSTTY_TERMINAL_OPT_RENDER_HOLD\n callback is invoked to report that the hold ended.\n\n"]
@@ -4303,7 +4321,7 @@ pub mod OptionAsAlt {
     pub const MAX_VALUE: Type = 2147483647;
 }
 pub mod KeyEncoderOption {
-    #[doc = " Key encoder option identifiers.\n\n These values are used with ghostty_key_encoder_set() to configure\n the behavior of the key encoder.\n"]
+    #[doc = " Key encoder option identifiers.\n\n These values are used with ghostty_key_encoder_set() and\n ghostty_key_encoder_get(). Each getter writes the same type the setter reads.\n"]
     pub type Type = ::std::os::raw::c_int;
     #[doc = " Not a real option. ghostty_key_encoder_set() returns\n GHOSTTY_INVALID_VALUE for it. Its value is 0, so a zeroed or\n uninitialized variable is never mistaken for a real option."]
     pub const INVALID: Type = 0;
@@ -4326,26 +4344,6 @@ pub mod KeyEncoderOption {
     #[doc = " Backarrow key mode (value: bool)\n See https://vt100.net/dec/ek-vt3xx-tp-002.pdf page 170\n If `false` (the default), `backspace` emits 0x7f\n If `true`, `backspace` emits 0x08"]
     pub const MAX_VALUE: Type = 2147483647;
 }
-#[doc = " Terminal-derived key encoder options."]
-#[repr(C)]
-#[derive(Debug, Default, Copy, Clone)]
-pub struct KeyEncoderTerminalOptions {
-    pub size: usize,
-    pub cursor_key_application: bool,
-    pub keypad_key_application: bool,
-    pub ignore_keypad_with_numlock: bool,
-    pub alt_esc_prefix: bool,
-    pub modify_other_keys_state_2: bool,
-    pub kitty_flags: KittyKeyFlags,
-    pub backarrow_key_mode: bool,
-}
-unsafe extern "C" {
-    #[doc = " Capture exactly the options ghostty_key_encoder_set_from_terminal applies."]
-    pub fn ghostty_key_encoder_terminal_options(
-        terminal: Terminal,
-        options: *mut KeyEncoderTerminalOptions,
-    ) -> Result::Type;
-}
 unsafe extern "C" {
     #[doc = " Create a new key encoder instance.\n\n Creates a new key encoder with default options. The encoder can be configured\n using ghostty_key_encoder_set() and must be freed using\n ghostty_key_encoder_free() when no longer needed.\n\n                GHOSTTY_INVALID_VALUE)\n"]
     pub fn ghostty_key_encoder_new(
@@ -4356,6 +4354,14 @@ unsafe extern "C" {
 unsafe extern "C" {
     #[doc = " Free a key encoder instance.\n\n Releases all resources associated with the key encoder. After this call,\n the encoder handle becomes invalid and must not be used.\n\n"]
     pub fn ghostty_key_encoder_free(encoder: KeyEncoder);
+}
+unsafe extern "C" {
+    #[doc = " Read an encoder option, including effective terminal-derived options after\n ghostty_key_encoder_set_from_terminal(). The output type is the value type\n documented on GhosttyKeyEncoderOption.\n\n NULL encoder or out, or OPT_INVALID, returns GHOSTTY_INVALID_VALUE.\n An unknown option or disabled input encoding returns GHOSTTY_UNSUPPORTED.\n"]
+    pub fn ghostty_key_encoder_get(
+        encoder: KeyEncoder,
+        option: KeyEncoderOption::Type,
+        out: *mut ::std::os::raw::c_void,
+    ) -> Result::Type;
 }
 unsafe extern "C" {
     #[doc = " Set an option on the key encoder.\n\n Configures the behavior of the key encoder. Options control various aspects\n of encoding such as terminal modes (cursor key application mode, keypad mode),\n protocol selection (Kitty keyboard protocol flags), and platform-specific\n behaviors (macOS option-as-alt).\n\n If you are using a terminal instance, you can set the key encoding\n options based on the active terminal state (e.g. legacy vs Kitty mode\n and associated flags) with ghostty_key_encoder_set_from_terminal().\n\n Passing NULL for `value` resets the option to its default, the same\n value a new encoder starts with. Each option's default is listed on\n GhosttyKeyEncoderOption.\n\n bool enabled = true;\n ghostty_key_encoder_set(\n     encoder, GHOSTTY_KEY_ENCODER_OPT_CURSOR_KEY_APPLICATION, &enabled);\n\n // Later, put the option back to its default (false).\n ghostty_key_encoder_set(\n     encoder, GHOSTTY_KEY_ENCODER_OPT_CURSOR_KEY_APPLICATION, NULL);\n\n              NULL to reset the option to its default\n         NULL or the value is out of range (such as an unknown\n         GhosttyOptionAsAlt), or GHOSTTY_UNSUPPORTED if `option` is not\n         known to this version of the library\n"]
@@ -4517,30 +4523,6 @@ pub mod MouseFormat {
     pub const SGR_PIXELS: Type = 4;
     pub const MAX_VALUE: Type = 2147483647;
 }
-#[doc = " Terminal-derived effective mouse encoder options."]
-#[repr(C)]
-#[derive(Debug, Copy, Clone)]
-pub struct MouseEncoderTerminalOptions {
-    pub size: usize,
-    pub event: MouseTrackingMode::Type,
-    pub format: MouseFormat::Type,
-}
-impl Default for MouseEncoderTerminalOptions {
-    fn default() -> Self {
-        let mut s = ::std::mem::MaybeUninit::<Self>::uninit();
-        unsafe {
-            ::std::ptr::write_bytes(s.as_mut_ptr(), 0, 1);
-            s.assume_init()
-        }
-    }
-}
-unsafe extern "C" {
-    #[doc = " Capture exactly the options ghostty_mouse_encoder_set_from_terminal applies."]
-    pub fn ghostty_mouse_encoder_terminal_options(
-        terminal: Terminal,
-        options: *mut MouseEncoderTerminalOptions,
-    ) -> Result::Type;
-}
 #[doc = " Mouse encoder size and geometry context.\n\n This describes the rendered terminal geometry used to convert\n surface-space positions into encoded coordinates.\n\n This is a sized struct. Initialize it with GHOSTTY_INIT_SIZED(), then set\n the fields you need. See @ref sized-structs.\n"]
 #[repr(C)]
 #[derive(Debug, Default, Copy, Clone)]
@@ -4565,7 +4547,7 @@ pub struct MouseEncoderSize {
     pub padding_left: u32,
 }
 pub mod MouseEncoderOption {
-    #[doc = " Mouse encoder option identifiers.\n\n These values are used with ghostty_mouse_encoder_set() to configure\n the behavior of the mouse encoder.\n"]
+    #[doc = " Mouse encoder option identifiers.\n\n These values are used with ghostty_mouse_encoder_set() and\n ghostty_mouse_encoder_get(). Each getter writes the same type the setter reads.\n"]
     pub type Type = ::std::os::raw::c_int;
     #[doc = " Not a real option. ghostty_mouse_encoder_set() returns\n GHOSTTY_INVALID_VALUE for it. Its value is 0, so a zeroed or\n uninitialized variable is never mistaken for a real option."]
     pub const INVALID: Type = 0;
@@ -4592,6 +4574,14 @@ unsafe extern "C" {
 unsafe extern "C" {
     #[doc = " Free a mouse encoder instance.\n\n"]
     pub fn ghostty_mouse_encoder_free(encoder: MouseEncoder);
+}
+unsafe extern "C" {
+    #[doc = " Read an encoder option, including effective tracking and format after\n ghostty_mouse_encoder_set_from_terminal(). The output type is the value type\n documented on GhosttyMouseEncoderOption. Initialize the SIZE output with\n GHOSTTY_INIT_SIZED().\n\n NULL encoder or out, or OPT_INVALID, returns GHOSTTY_INVALID_VALUE.\n An unknown option or disabled input encoding returns GHOSTTY_UNSUPPORTED.\n"]
+    pub fn ghostty_mouse_encoder_get(
+        encoder: MouseEncoder,
+        option: MouseEncoderOption::Type,
+        out: *mut ::std::os::raw::c_void,
+    ) -> Result::Type;
 }
 unsafe extern "C" {
     #[doc = " Set an option on the mouse encoder.\n\n Passing NULL for `value` resets the option to its default, the same\n value a new encoder starts with. Each option's default is listed on\n GhosttyMouseEncoderOption.\n\n GhosttyMouseFormat format = GHOSTTY_MOUSE_FORMAT_SGR;\n GhosttyResult result = ghostty_mouse_encoder_set(\n     encoder, GHOSTTY_MOUSE_ENCODER_OPT_FORMAT, &format);\n\n              reset the option to its default\n         NULL or the value is not valid (an unknown tracking mode or\n         format, or a size that is too small or has a zero cell\n         dimension), or GHOSTTY_UNSUPPORTED if `option` is not known to\n         this version of the library\n"]
@@ -4970,17 +4960,6 @@ unsafe extern "C" {
 unsafe extern "C" {
     #[doc = " Decode one history page, or the pixels of one Kitty graphics image, into\n the terminal returned by READY.\n\n Each GHOSTTY_SUCCESS consumes and validates one record: a history page\n together with the Kitty graphics placements pinned to it, or the pixels\n of one image or animation frame. Pixels may arrive at any point, even\n between history pages. Query GHOSTTY_SNAPSHOT_DECODER_DATA_PROGRESS_KIND\n and the progress values for that kind before calling next again.\n GHOSTTY_NO_VALUE means FINISH was validated; repeated calls after FINISH\n also return GHOSTTY_NO_VALUE.\n\n // How many image bytes the primary screen is waiting for, to show\n // progress while they arrive.\n uint64_t pending = 0;\n ghostty_snapshot_decoder_get(\n     decoder, GHOSTTY_SNAPSHOT_DECODER_DATA_KITTY_PENDING_BYTES_PRIMARY,\n     &pending);\n uint64_t received = 0;\n\n GhosttyResult result;\n while ((result = ghostty_snapshot_decoder_next(decoder)) == GHOSTTY_SUCCESS) {\n   GhosttySnapshotDecoderProgressKind kind;\n   ghostty_snapshot_decoder_get(\n       decoder, GHOSTTY_SNAPSHOT_DECODER_DATA_PROGRESS_KIND, &kind);\n\n   if (kind == GHOSTTY_SNAPSHOT_DECODER_PROGRESS_KIND_PAGE) {\n     // Scrollback grew by this many rows.\n     size_t rows = 0;\n     ghostty_snapshot_decoder_get(\n         decoder, GHOSTTY_SNAPSHOT_DECODER_DATA_PROGRESS_ROWS, &rows);\n     continue;\n   }\n\n   // An image's pixels arrived.\n   GhosttyTerminalScreen screen;\n   size_t bytes = 0;\n   ghostty_snapshot_decoder_get(\n       decoder, GHOSTTY_SNAPSHOT_DECODER_DATA_PROGRESS_SCREEN, &screen);\n   ghostty_snapshot_decoder_get(\n       decoder, GHOSTTY_SNAPSHOT_DECODER_DATA_PROGRESS_IMAGE_BYTES, &bytes);\n   if (screen == GHOSTTY_TERMINAL_SCREEN_PRIMARY) received += bytes;\n }\n\n // GHOSTTY_NO_VALUE means the snapshot is complete. Dropped pixels report\n // zero bytes, so received can end up below pending.\n\n The terminal may be rendered, resized, and fed live PTY input between calls.\n If a history page can no longer be applied safely, it is still consumed and\n validated and progress reports zero rows. Image pixels work the same way:\n if live input deleted the image, or sent a new image with the same ID, the\n pixels are consumed and validated and progress reports zero bytes. The\n decoder applies history and pixels to your terminal produced\n by its READY operation.\n\n If GHOSTTY_SNAPSHOT_DECODER_OPT_COMPRESS_HISTORY is true, the page is\n compressed before this function returns, unless it is visible in the\n terminal's viewport.\n\n A decoding error invalidates the decoder's source position. The terminal\n remains caller-owned and usable with its already-restored history, but only\n ghostty_snapshot_decoder_free() may subsequently be called on the decoder.\n\n         FINISH, or an error code on failure\n"]
     pub fn ghostty_snapshot_decoder_next(decoder: SnapshotDecoder) -> Result::Type;
-}
-unsafe extern "C" {
-    #[doc = " Decode one caller-framed progressive unit without reading the following\n unit's header. The unit is HISTORY records followed by one PAGE (and its\n optional KITTY_IMAGE_PAGE_PLACEMENTS), one KITTY_IMAGE_PAYLOAD, or FINISH.\n Set page_placements only when this unit includes that placement record.\n Unknown records may precede a unit. The caller must validate complete unit\n framing before calling and keep the reader's storage alive throughout.\n Return values and progress getters are identical to decoder_next. An image\n in a Kitty-disabled build is validated and discarded, with image progress\n reporting zero attached bytes. Normal decoder_next lookahead is unchanged."]
-    pub fn ghostty_snapshot_decoder_next_staged(
-        decoder: SnapshotDecoder,
-        page_placements: bool,
-    ) -> Result::Type;
-}
-unsafe extern "C" {
-    #[doc = " Prevalidate the framing and CRC32C of every record in a bounded staged unit.\n The bytes do not include a snapshot envelope. Unknown records are validated\n too. A partial header, partial payload, or bad CRC returns INVALID_VALUE.\n This does not allocate or mutate any terminal. Call it before next_staged\n when a rejected multi-record unit must not partially change scrollback.\n Semantic record ordering is still the decoder's responsibility. NULL with\n zero length is an empty valid sequence; NULL with nonzero length is invalid."]
-    pub fn ghostty_snapshot_validate_records(bytes: *const u8, len: usize) -> Result::Type;
 }
 unsafe extern "C" {
     #[doc = " Decode and validate one complete snapshot.\n\n This is the one-shot form of READY followed by all history pages through\n FINISH. It may only be called before decoding starts. Bytes following FINISH\n are left unread. On success terminal receives a caller-owned terminal with\n its persistent VT stream restored. Continuation tracking on the returned\n terminal is disabled by default. When\n GHOSTTY_SNAPSHOT_DECODER_OPT_RETAIN_CONTINUATION is true, the decoder's\n maximum continuation size is applied to the terminal, and the terminal\n continuation APIs export the exact current continuation when that limit is\n nonzero. Tracking remains enabled even if the exported continuation is\n empty. Callers that do not need ongoing tracking must set\n GHOSTTY_TERMINAL_OPT_CONTINUATION_MAX_BYTES to zero after export and before\n writing any post-snapshot bytes, because later input may change it.\n terminal is set to NULL on every error.\n A decoding, I/O, or allocation error after input consumption begins poisons\n the decoder, after which it must be freed. An invalid argument or\n lifecycle error detected before the operation consumes input does not\n poison it.\n\n"]

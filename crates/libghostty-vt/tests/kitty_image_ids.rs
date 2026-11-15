@@ -1,6 +1,9 @@
 #![cfg(all(feature = "kitty-graphics", not(miri)))]
 
-use libghostty_vt::{Terminal, kitty::graphics::PlacementIterator};
+use libghostty_vt::{
+    Terminal,
+    kitty::graphics::{ImageIterator, PlacementIterator},
+};
 
 #[test]
 fn placeholder_default_prefers_lowest_external_placement() {
@@ -73,7 +76,7 @@ fn enumerates_unplaced_images_and_reuses_output_capacity() {
 }
 
 #[test]
-fn empty_storage_clears_stale_ids_without_allocating() {
+fn empty_storage_clears_stale_ids_without_allocating_output() {
     let mut terminal = Terminal::new(8, 3).unwrap();
     terminal.set_kitty_image_storage_limit(1024).unwrap();
     let mut ids = Vec::new();
@@ -95,4 +98,32 @@ fn empty_storage_clears_stale_ids_without_allocating() {
         .unwrap();
     assert_eq!(ids.len(), 0);
     assert_eq!(ids.capacity(), capacity);
+}
+
+#[test]
+fn image_iterator_can_be_reused_and_images_outlive_iteration() {
+    let mut terminal = Terminal::new(8, 3).unwrap();
+    let mut iterator = ImageIterator::new().unwrap();
+    let graphics = terminal.kitty_graphics().unwrap().unwrap();
+    assert!(iterator.update(&graphics).unwrap().next().is_none());
+
+    terminal.vt_write(b"\x1b_Ga=t,f=32,s=1,v=1,i=42;/wAA/w==\x1b\\");
+    terminal.vt_write(b"\x1b_Ga=t,f=24,s=1,v=1,i=7;AAD/\x1b\\");
+    {
+        let graphics = terminal.kitty_graphics().unwrap().unwrap();
+        let mut images: Vec<_> = iterator.update(&graphics).unwrap().collect();
+        images.sort_by_key(|image| image.id().unwrap());
+        assert_eq!(
+            images.iter().map(|i| i.id().unwrap()).collect::<Vec<_>>(),
+            [7, 42]
+        );
+        assert_eq!(images[0].width().unwrap(), 1);
+        assert_eq!(images[1].data().unwrap().unwrap(), [255, 0, 0, 255]);
+    }
+    terminal.vt_write(b"\x1b_Ga=d,d=I,i=42\x1b\\");
+    let graphics = terminal.kitty_graphics().unwrap().unwrap();
+    let mut images = iterator.update(&graphics).unwrap();
+    assert_eq!(images.next().unwrap().id().unwrap(), 7);
+    assert!(images.next().is_none());
+    assert!(images.next().is_none());
 }

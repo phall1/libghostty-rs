@@ -54,19 +54,19 @@ impl EncoderOptions {
     /// Capture exactly the options that
     /// [`Encoder::set_options_from_terminal`] would apply.
     pub fn from_terminal(terminal: &Terminal<'_, '_>) -> Result<Self> {
-        let mut raw = ffi::sized!(ffi::KeyEncoderTerminalOptions);
-        let result = unsafe {
-            ffi::ghostty_key_encoder_terminal_options(terminal.inner.as_raw(), &raw mut raw)
-        };
-        from_result(result)?;
+        // Let the native encoder resolve terminal modes rather than mirroring
+        // its precedence rules in Rust. Getters read the same options setters
+        // accept, so no parallel C snapshot struct is needed.
+        let mut encoder = Encoder::new()?;
+        encoder.set_options_from_terminal(terminal);
         Ok(Self {
-            cursor_key_application: raw.cursor_key_application,
-            keypad_key_application: raw.keypad_key_application,
-            ignore_keypad_with_numlock: raw.ignore_keypad_with_numlock,
-            alt_esc_prefix: raw.alt_esc_prefix,
-            modify_other_keys_state_2: raw.modify_other_keys_state_2,
-            kitty_flags: KittyKeyFlags::from_bits_retain(raw.kitty_flags),
-            backarrow_key_mode: raw.backarrow_key_mode,
+            cursor_key_application: encoder.get(Opt::CURSOR_KEY_APPLICATION)?,
+            keypad_key_application: encoder.get(Opt::KEYPAD_KEY_APPLICATION)?,
+            ignore_keypad_with_numlock: encoder.get(Opt::IGNORE_KEYPAD_WITH_NUMLOCK)?,
+            alt_esc_prefix: encoder.get(Opt::ALT_ESC_PREFIX)?,
+            modify_other_keys_state_2: encoder.get(Opt::MODIFY_OTHER_KEYS_STATE_2)?,
+            kitty_flags: KittyKeyFlags::from_bits_retain(encoder.get(Opt::KITTY_FLAGS)?),
+            backarrow_key_mode: encoder.get(Opt::BACKARROW_KEY_MODE)?,
         })
     }
 }
@@ -100,6 +100,16 @@ impl<'alloc> Encoder<'alloc> {
         value: *const std::ffi::c_void,
     ) {
         unsafe { ffi::ghostty_key_encoder_set(self.0.as_raw(), option, value) };
+    }
+
+    fn get<T>(&self, option: Opt::Type) -> Result<T> {
+        let mut value = MaybeUninit::<T>::zeroed();
+        let result = unsafe {
+            ffi::ghostty_key_encoder_get(self.0.as_raw(), option, value.as_mut_ptr().cast())
+        };
+        from_result(result)?;
+        // SAFETY: Each private call selects the documented output type.
+        Ok(unsafe { value.assume_init() })
     }
 
     /// Encode a key event into a terminal escape sequence.

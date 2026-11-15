@@ -114,8 +114,6 @@ impl Terminal<'_, '_> {
     }
 }
 
-const RECORD_HEADER_BYTES: usize = 10;
-
 /// Own callback storage through its original raw pointer. A movable Box is not
 /// enough: deriving userdata from a mutable Box reborrow and then reborrowing
 /// through that Box can invalidate the retained pointer's aliasing provenance.
@@ -165,83 +163,6 @@ struct FeedReader {
     max_bytes: usize,
 }
 
-const RECORD_TAG_PAGE: u16 = 3;
-const RECORD_TAG_HISTORY: u16 = 4;
-const RECORD_TAG_FINISH: u16 = 6;
-const RECORD_TAG_IMAGE: u16 = 9;
-const RECORD_TAG_PLACEMENTS: u16 = 10;
-
-fn staged_record(bytes: &[u8], offset: usize) -> Result<(u16, usize, usize)> {
-    let header_end = offset
-        .checked_add(RECORD_HEADER_BYTES)
-        .ok_or(Error::InvalidValue)?;
-    let header = bytes.get(offset..header_end).ok_or(Error::InvalidValue)?;
-    let tag = u16::from_le_bytes([header[0], header[1]]);
-    let payload_len = u32::from_le_bytes([header[2], header[3], header[4], header[5]]) as usize;
-    let end = header_end
-        .checked_add(payload_len)
-        .filter(|end| *end <= bytes.len())
-        .ok_or(Error::InvalidValue)?;
-    Ok((tag, header_end, end))
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum StagedHistoryKind {
-    Page { rows: usize, placements: bool },
-    Image,
-    Finish,
-}
-
-/// Validate the complete framing boundary before native can mutate a terminal.
-/// CRCs are checked by native's record-only preflight after structural and row
-/// validation, but before the decoder can mutate the terminal.
-fn validate_staged_history_unit(bytes: &[u8]) -> Result<StagedHistoryKind> {
-    let mut offset = 0;
-    let mut histories = 0;
-    loop {
-        let (tag, payload, end) = staged_record(bytes, offset)?;
-        match tag {
-            RECORD_TAG_HISTORY if histories < 2 => {
-                histories += 1;
-                offset = end;
-            }
-            RECORD_TAG_PAGE => {
-                let rows_end = payload.checked_add(4).ok_or(Error::InvalidValue)?;
-                let header = bytes
-                    .get(payload..rows_end)
-                    .filter(|_| rows_end <= end)
-                    .ok_or(Error::InvalidValue)?;
-                return Ok(StagedHistoryKind::Page {
-                    rows: u16::from_le_bytes([header[2], header[3]]) as usize,
-                    placements: validate_page_suffix(bytes, end)?,
-                });
-            }
-            RECORD_TAG_IMAGE if end == bytes.len() => return Ok(StagedHistoryKind::Image),
-            RECORD_TAG_FINISH if end == bytes.len() => return Ok(StagedHistoryKind::Finish),
-            // Like native nextHeader, tolerate future optional records before
-            // a progress-bearing unit, but never concatenate two units.
-            0 | 11..=u16::MAX => offset = end,
-            _ => return Err(Error::InvalidValue),
-        }
-    }
-}
-
-fn validate_page_suffix(bytes: &[u8], mut offset: usize) -> Result<bool> {
-    if offset == bytes.len() {
-        return Ok(false);
-    }
-    loop {
-        let (tag, _, end) = staged_record(bytes, offset)?;
-        match tag {
-            RECORD_TAG_PLACEMENTS if end == bytes.len() => return Ok(true),
-            // Native explicitly reads the placements header in this mode and
-            // skips optional unknown records on the way, including their CRCs.
-            0 | 11..=u16::MAX => offset = end,
-            _ => return Err(Error::InvalidValue),
-        }
-    }
-}
-
 impl FeedReader {
     fn new(max_bytes: usize) -> Result<Self> {
         if max_bytes == 0 {
@@ -268,14 +189,15 @@ impl FeedReader {
         Ok(())
     }
 
-    fn finish_operation(&mut self) -> bool {
-        let consumed_all = self.offset == self.bytes.len();
-        // Release potentially large READY/page storage as soon as native has
-        // consumed the explicit unit. This also makes later feeds start at 0.
-        self.bytes.clear();
-        self.bytes.shrink_to_fit();
+    fn finish_operation(&mut self) {
+        // Stock next may read ahead into a following record. Keep every unread
+        // byte, regardless of record boundaries; native owns any lookahead it
+        // already consumed. Fully consumed staging releases its allocation.
+        self.bytes.drain(..self.offset);
         self.offset = 0;
-        consumed_all
+        if self.bytes.is_empty() {
+            self.bytes.shrink_to_fit();
+        }
     }
 }
 
@@ -322,15 +244,13 @@ impl FeedCore<'_> {
     }
 
     fn complete_operation(&mut self, result: ffi::Result::Type) -> Result<()> {
-        let consumed_all = self.source.finish_operation();
-        if result != ffi::Result::SUCCESS || !consumed_all {
+        if result != ffi::Result::SUCCESS {
             self.failed = true;
+            self.source.bytes.clear();
+            self.source.offset = 0;
         }
-        from_result(result)?;
-        if !consumed_all {
-            return Err(Error::InvalidValue);
-        }
-        Ok(())
+        self.source.finish_operation();
+        from_result(result)
     }
 
     fn get<T>(&self, tag: Data::Type) -> Result<T> {
@@ -355,9 +275,14 @@ impl Drop for FeedCore<'_> {
 /// An owned, bounded staging source for the pull-based snapshot decoder.
 ///
 /// Network or other nonblocking input should be accumulated with [`Self::feed`]
-/// and [`Self::ready`] called only after the complete READY record has arrived.
-/// Native code therefore never mistakes temporary starvation for permanent
-/// EOF. The staged bytes are released after each decoding operation.
+/// and [`Self::ready`] called only when enough input is available. This is an
+/// ownership adapter, not a transport parser: it does not inspect framing,
+/// checksums, or advertised row counts before calling the native decoder.
+///
+/// Native reads remain synchronous and zero bytes mean permanent EOF, not
+/// temporary starvation. Callers must supply enough input for each operation,
+/// including any lookahead required by [`FeedIncrementalDecoder::next`].
+/// Unread bytes survive operations; fully consumed staging releases its storage.
 #[derive(Debug)]
 pub struct FeedDecoder<'alloc> {
     core: FeedCore<'alloc>,
@@ -387,7 +312,7 @@ impl<'alloc> FeedDecoder<'alloc> {
         })
     }
 
-    /// Append one bounded fragment to the not-yet-decoded READY prefix.
+    /// Append a bounded fragment to the owned input.
     pub fn feed(&mut self, bytes: &[u8]) -> Result<&mut Self> {
         self.core.feed(bytes)?;
         Ok(self)
@@ -418,20 +343,29 @@ impl<'alloc> FeedDecoder<'alloc> {
         Ok(self)
     }
 
-    /// Decode the staged prefix through its authenticated READY record.
+    /// Retain continuation tracking on the terminal returned at READY.
+    ///
+    /// Like [`Decoder::set_retain_continuation`], this uses the configured
+    /// maximum continuation size as the terminal's ongoing tracking limit.
+    /// Tracking is disabled by default.
+    pub fn set_retain_continuation(&mut self, value: bool) -> Result<&mut Self> {
+        let result = unsafe {
+            ffi::ghostty_snapshot_decoder_set(
+                self.core.inner.as_raw(),
+                Opt::RETAIN_CONTINUATION,
+                std::ptr::from_ref(&value).cast(),
+            )
+        };
+        from_result(result)?;
+        Ok(self)
+    }
+
+    /// Decode the staged prefix through READY, retaining any unread input.
     pub fn ready<'cb>(mut self) -> Result<FeedIncrementalDecoder<'alloc, 'cb>> {
         let mut raw: ffi::Terminal = std::ptr::null_mut();
         let result =
             unsafe { ffi::ghostty_snapshot_decoder_ready(self.core.inner.as_raw(), &raw mut raw) };
-        if let Err(error) = self.core.complete_operation(result) {
-            // A successful native READY with trailing staged bytes has already
-            // transferred a terminal even though the safe framing contract
-            // rejects the unit. Reclaim it before dropping the decoder.
-            if !raw.is_null() {
-                unsafe { ffi::ghostty_terminal_free(raw) };
-            }
-            return Err(error);
-        }
+        self.core.complete_operation(result)?;
         let terminal = unsafe { Terminal::from_raw(raw)? };
         Ok(FeedIncrementalDecoder {
             core: self.core,
@@ -442,25 +376,16 @@ impl<'alloc> FeedDecoder<'alloc> {
     }
 }
 
-/// Progress from one complete staged history page or image unit.
+/// Native progress from a decoded history page or image.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct FeedProgress {
     /// Whether this unit restored a history page or image pixels.
     pub kind: ProgressKind,
     /// Screen associated with the decoded page or image payload.
     pub screen: Screen,
-    /// Rows authenticated from the staged PAGE header.
-    ///
-    /// This is the wire outcome callers should compare with protocol metadata.
-    /// It is independent of local history limits or live terminal changes and
-    /// remains nonzero when the authenticated page is intentionally discarded,
-    /// including after a live reset or scrollback clear.
-    /// Image payloads report zero rows; inspect [`Self::kind`] to distinguish
-    /// them from pages that were consumed but not retained.
-    pub authenticated_rows: usize,
     /// Rows retained in the live terminal, or zero when local history limits,
     /// an incompatible resize, or a live reset/scrollback clear discard the
-    /// authenticated page. Discarded pages still advance authenticated progress.
+    /// page. This is not the row count advertised in a transport frame.
     pub rows: usize,
     /// Pages remaining in this screen's HISTORY sequence, or zero for images.
     pub remaining: u32,
@@ -479,7 +404,7 @@ pub struct FeedIncrementalDecoder<'alloc, 'cb> {
 }
 
 impl<'alloc: 'cb, 'cb> FeedIncrementalDecoder<'alloc, 'cb> {
-    /// Append bytes belonging to the next complete history unit or FINISH.
+    /// Append bounded input for subsequent decoding operations.
     pub fn feed(&mut self, bytes: &[u8]) -> Result<&mut Self> {
         if self.finished {
             return Err(Error::InvalidValue);
@@ -500,110 +425,39 @@ impl<'alloc: 'cb, 'cb> FeedIncrementalDecoder<'alloc, 'cb> {
         self.core.source.bytes.capacity()
     }
 
-    /// Decode one complete staged page or image unit, or authenticate FINISH.
+    /// Decode one history page or image, or validate FINISH.
     ///
-    /// A PAGE unit may include preceding HISTORY manifests and its immediately
-    /// following `KITTY_IMAGE_PAGE_PLACEMENTS` record. An image payload is a
-    /// separate unit, not a page. Unknown optional records may precede a unit.
-    /// `Ok(None)` is returned only after native validation of FINISH.
+    /// This calls the stock native decoder. A page may require the following
+    /// record header as lookahead to determine whether placements follow it.
+    /// Supply that lookahead (or the complete placements record) before calling;
+    /// an exhausted source is permanent EOF and cannot be repaired by feeding
+    /// more bytes. Unread bytes and native lookahead survive successful calls.
+    ///
+    /// `Ok(None)` means native validated FINISH; repeated calls return
+    /// `Ok(None)`. A decoding error poisons the decoder, but the live terminal
+    /// remains usable. Transport-specific prevalidation belongs to the caller.
     #[expect(
         clippy::should_implement_trait,
         reason = "decoding is fallible and mutates the separately accessible live terminal"
     )]
     pub fn next(&mut self) -> Result<Option<FeedProgress>> {
-        self.next_inner(None)
-    }
-
-    /// Decode one unit only when its staged PAGE has `expected_rows`.
-    ///
-    /// PAGE dimensions and complete framing are checked before native applies
-    /// the page. FINISH requires zero expected rows. A mismatch releases the
-    /// staged allocation, poisons this decoder, and leaves the terminal intact.
-    /// Image payloads require zero expected rows and report their own kind.
-    /// Successful PAGE results report the same count in
-    /// [`FeedProgress::authenticated_rows`], while [`FeedProgress::rows`] may
-    /// be zero when local limits or live terminal changes (including reset or
-    /// scrollback clear) prevent retaining those rows. Discarding a page does
-    /// not skip authentication or change the expected wire row count.
-    pub fn next_checked(&mut self, expected_rows: usize) -> Result<Option<FeedProgress>> {
-        self.next_inner(Some(expected_rows))
-    }
-
-    fn next_inner(&mut self, expected_rows: Option<usize>) -> Result<Option<FeedProgress>> {
-        if self.finished || self.core.failed {
+        if self.core.failed {
             return Err(Error::InvalidValue);
+        }
+        if self.finished {
+            return Ok(None);
         }
         if self.ready_terminal != self.terminal.id {
             return Err(Error::InvalidValue);
         }
-        let kind = self.validate_staged(expected_rows)?;
-        let placements = matches!(
-            kind,
-            StagedHistoryKind::Page {
-                placements: true,
-                ..
-            }
-        );
-        // Unlike normal next(), this call does not speculatively read the next
-        // record header past the explicitly staged unit.
-        let result = unsafe {
-            ffi::ghostty_snapshot_decoder_next_staged(self.core.inner.as_raw(), placements)
-        };
+        let result = unsafe { ffi::ghostty_snapshot_decoder_next(self.core.inner.as_raw()) };
         if result == ffi::Result::NO_VALUE {
-            return self.complete_finish(kind);
+            self.core.complete_operation(ffi::Result::SUCCESS)?;
+            self.finished = true;
+            return Ok(None);
         }
         self.core.complete_operation(result)?;
-        let authenticated_rows = match kind {
-            StagedHistoryKind::Page { rows, .. } => rows,
-            StagedHistoryKind::Image => 0,
-            StagedHistoryKind::Finish => {
-                self.core.failed = true;
-                return Err(Error::InvalidValue);
-            }
-        };
-        let progress = self.progress(authenticated_rows)?;
-        let matches_wire = matches!(
-            (kind, progress.kind),
-            (StagedHistoryKind::Page { .. }, ProgressKind::Page { .. })
-                | (StagedHistoryKind::Image, ProgressKind::Image { .. })
-        );
-        if !matches_wire {
-            self.core.failed = true;
-            return Err(Error::InvalidValue);
-        }
-        Ok(Some(progress))
-    }
-
-    fn validate_staged(&mut self, expected_rows: Option<usize>) -> Result<StagedHistoryKind> {
-        let Ok(kind) = validate_staged_history_unit(&self.core.source.bytes) else {
-            return self.reject_staged(Error::InvalidValue);
-        };
-        let mismatched = expected_rows.is_some_and(|expected| match kind {
-            StagedHistoryKind::Page { rows, .. } => rows != expected,
-            StagedHistoryKind::Finish | StagedHistoryKind::Image => expected != 0,
-        });
-        if mismatched {
-            return self.reject_staged(Error::InvalidValue);
-        }
-        let bytes = &self.core.source.bytes;
-        // SAFETY: The complete bounded unit remains borrowed for this
-        // synchronous, allocation-free check. Validate ALL record CRCs before
-        // applying a PAGE whose placement/unknown suffix might be corrupt.
-        let result = unsafe { ffi::ghostty_snapshot_validate_records(bytes.as_ptr(), bytes.len()) };
-        if let Err(error) = from_result(result) {
-            return self.reject_staged(error);
-        }
-        Ok(kind)
-    }
-
-    fn complete_finish(&mut self, kind: StagedHistoryKind) -> Result<Option<FeedProgress>> {
-        let consumed_all = self.core.source.finish_operation();
-        if !consumed_all || kind != StagedHistoryKind::Finish {
-            self.core.failed = true;
-            return Err(Error::InvalidValue);
-        }
-        self.finished = true;
-        Ok(None)
+        self.progress().map(Some)
     }
 
     fn progress_kind(&self) -> Result<ProgressKind> {
@@ -624,7 +478,7 @@ impl<'alloc: 'cb, 'cb> FeedIncrementalDecoder<'alloc, 'cb> {
         }
     }
 
-    fn progress(&self, authenticated_rows: usize) -> Result<FeedProgress> {
+    fn progress(&self) -> Result<FeedProgress> {
         let kind = self.progress_kind()?;
         let (rows, remaining) = match kind {
             ProgressKind::Page { rows, remaining } => (rows, remaining),
@@ -637,17 +491,9 @@ impl<'alloc: 'cb, 'cb> FeedIncrementalDecoder<'alloc, 'cb> {
                 .get::<ffi::TerminalScreen::Type>(Data::PROGRESS_SCREEN)?
                 .try_into()
                 .map_err(|_| Error::InvalidValue)?,
-            authenticated_rows,
             rows,
             remaining,
         })
-    }
-
-    fn reject_staged<T>(&mut self, error: Error) -> Result<T> {
-        // Rejection occurs before native reads, so offset is necessarily zero.
-        let _ = self.core.source.finish_operation();
-        self.core.failed = true;
-        Err(error)
     }
 
     /// Borrow the renderable terminal while history is arriving.
@@ -699,7 +545,8 @@ mod miri_soundness {
             assert_eq!(read, 4);
             // SAFETY: The adapter initializes the complete destination slice.
             assert_eq!(unsafe { buffer.assume_init() }, *b"data\0\0\0\0");
-            assert!(moved.finish_operation());
+            moved.finish_operation();
+            assert!(moved.bytes.is_empty());
             owner = Some(moved);
         }
     }
@@ -709,575 +556,220 @@ mod miri_soundness {
 mod feed_tests {
     use super::*;
 
-    /// Split an upstream one-shot stream at the same boundaries the staged
-    /// adapter promises. PAGE placements belong to that page, not the next one.
-    fn staged_units(bytes: &[u8]) -> (usize, Vec<Vec<u8>>) {
-        let ready = Decoder::new_buf(bytes).unwrap().ready().unwrap();
-        let prefix = ready.decoder().source_offset().unwrap();
-        let mut offset = prefix;
-        let mut start = offset;
-        let mut units = Vec::new();
-        while offset < bytes.len() {
-            let (tag, _, mut end) = staged_record(bytes, offset).unwrap();
-            if tag == RECORD_TAG_HISTORY {
-                offset = end;
-                continue;
-            }
-            if tag == RECORD_TAG_PAGE && end < bytes.len() {
-                let (following, _, following_end) = staged_record(bytes, end).unwrap();
-                if following == RECORD_TAG_PLACEMENTS {
-                    end = following_end;
-                }
-            }
-            units.push(bytes[start..end].to_vec());
-            offset = end;
-            start = end;
-        }
-        (prefix, units)
-    }
-
-    #[cfg(feature = "kitty-graphics")]
-    fn source_with_images() -> Terminal<'static, 'static> {
+    fn snapshot() -> Vec<u8> {
         let mut source = Terminal::new(200, 3).unwrap();
+        source.set_scrollback_max_lines(Some(1000)).unwrap();
         source.set_scrollback_max_bytes(Some(usize::MAX)).unwrap();
-        source.set_scrollback_max_lines(Some(5000)).unwrap();
-        // The first placement ends up pinned to a history page. The second is
-        // active at READY; both images' pixels arrive as separate progress.
-        source.vt_write(b"\x1b_Ga=T,f=32,s=2,v=1,i=7,q=2;AAAA/wAAAP8=\x1b\\");
-        source.vt_write(&b"history\r\n".repeat(1200));
-        source.vt_write(b"\x1b_Ga=T,f=32,s=2,v=1,i=8,q=2;AAAA/wAAAP8=\x1b\\");
-        source
+        source.vt_write(&b"history\r\n".repeat(500));
+        let mut bytes = Vec::new();
+        source.encode_snapshot(&mut bytes).unwrap();
+        bytes
     }
 
     #[test]
-    #[cfg(feature = "kitty-graphics")]
-    fn staged_feed_handles_image_payloads_and_page_placements() {
-        let mut source = source_with_images();
-        let mut bytes = Vec::new();
-        source.encode_snapshot(&mut bytes).unwrap();
-        let (prefix, units) = staged_units(&bytes);
-        assert!(units.iter().any(|unit| matches!(
-            validate_staged_history_unit(unit).unwrap(),
-            StagedHistoryKind::Page {
-                placements: true,
-                ..
-            }
-        )));
+    fn full_input_survives_ready_and_native_page_lookahead() {
+        let bytes = snapshot();
+        let mut stock = Decoder::new_buf(&bytes).unwrap().ready().unwrap();
         let mut feed = FeedDecoder::new(bytes.len()).unwrap();
-        for byte in bytes[..prefix].chunks(1) {
-            feed.feed(byte).unwrap();
+        for fragment in bytes.chunks(17) {
+            feed.feed(fragment).unwrap();
         }
         let mut feed = feed.ready().unwrap();
+        assert!(feed.staged_bytes() > 0, "READY retains unread history");
         let mut pages = 0;
-        let mut images = Vec::new();
-        let mut finished = false;
-        for unit in units {
-            let expected = match validate_staged_history_unit(&unit).unwrap() {
-                StagedHistoryKind::Page { rows, .. } => rows,
-                _ => 0,
-            };
-            for byte in unit.chunks(1) {
-                feed.feed(byte).unwrap();
-            }
-            match feed.next_checked(expected).unwrap() {
-                Some(FeedProgress {
-                    kind: ProgressKind::Page { .. },
-                    ..
-                }) => pages += 1,
-                Some(FeedProgress {
-                    kind: ProgressKind::Image { id, bytes, .. },
-                    authenticated_rows,
-                    ..
-                }) => {
-                    assert_eq!(authenticated_rows, 0);
-                    images.push((id, bytes));
-                }
-                None => finished = true,
-            }
-            assert_eq!(feed.staged_capacity_bytes(), 0);
+        while let Some(expected) = stock.next().unwrap() {
+            let actual = feed.next().unwrap().unwrap();
+            assert_eq!(actual.kind, expected.kind().unwrap());
+            assert_eq!(actual.screen, expected.screen().unwrap());
+            pages += 1;
         }
-        assert!(finished);
-        assert!(pages > 1);
-        images.sort_unstable();
-        assert_eq!(images, [(7, 8), (8, 8)]);
-        let graphics = feed.terminal().kitty_graphics().unwrap().unwrap();
-        assert!(graphics.image(7).unwrap().data().unwrap().is_some());
-        assert!(graphics.image(8).unwrap().data().unwrap().is_some());
+        assert!(pages > 1, "exercise successive native lookahead headers");
+        assert!(feed.next().unwrap().is_none());
+        assert!(feed.next().unwrap().is_none());
+        assert_eq!(feed.staged_bytes(), 0);
+        assert_eq!(feed.staged_capacity_bytes(), 0);
+        assert_eq!(
+            feed.terminal().scrollback_rows().unwrap(),
+            stock.terminal().scrollback_rows().unwrap()
+        );
     }
 
+    /// Test-only fixture adapter. Production `FeedDecoder` never parses records.
+    /// Add empty primary-screen placements after each bare PAGE so stock next
+    /// has a complete suffix without borrowing a later record as lookahead.
     #[cfg(feature = "kitty-graphics")]
-    fn optional_record() -> Vec<u8> {
-        // Unknown tag 0x4000, one byte 'x', CRC32C 0x766a52e8.
-        vec![0, 64, 1, 0, 0, 0, 232, 82, 106, 118, b'x']
-    }
-
-    #[cfg(feature = "kitty-graphics")]
-    fn corrupt_page_suffix(unit: &mut Vec<u8>, unknown: bool) {
-        if !unknown {
-            *unit.last_mut().unwrap() ^= 1;
-            return;
-        }
-        let mut offset = 0;
-        loop {
-            let (tag, _, end) = staged_record(unit, offset).unwrap();
-            if tag == RECORD_TAG_PAGE {
-                let mut record = optional_record();
-                *record.last_mut().unwrap() ^= 1;
-                unit.splice(end..end, record);
-                return;
-            }
+    fn page_units(bytes: &[u8], prefix: usize) -> Vec<Vec<u8>> {
+        const EMPTY_PLACEMENTS: [u8; 16] = [10, 0, 6, 0, 0, 0, 112, 62, 204, 119, 0, 0, 0, 0, 0, 0];
+        let mut units = Vec::new();
+        let mut unit = Vec::new();
+        let mut offset = prefix;
+        while offset < bytes.len() {
+            let header = &bytes[offset..offset + 10];
+            let tag = u16::from_le_bytes(header[..2].try_into().unwrap());
+            let len = u32::from_le_bytes(header[2..6].try_into().unwrap()) as usize;
+            let end = offset + 10 + len;
+            unit.extend_from_slice(&bytes[offset..end]);
             offset = end;
-        }
-    }
-
-    #[test]
-    #[cfg(feature = "kitty-graphics")]
-    fn corrupt_placements_or_unknown_suffix_do_not_apply_the_page() {
-        for unknown in [false, true] {
-            let mut source = source_with_images();
-            let mut bytes = Vec::new();
-            source.encode_snapshot(&mut bytes).unwrap();
-            let (prefix, units) = staged_units(&bytes);
-            let mut feed = FeedDecoder::new(bytes.len() + 64).unwrap();
-            feed.feed(&bytes[..prefix]).unwrap();
-            let mut feed = feed.ready().unwrap();
-            let mut checked = false;
-            for mut unit in units {
-                if matches!(
-                    validate_staged_history_unit(&unit).unwrap(),
-                    StagedHistoryKind::Page {
-                        placements: true,
-                        ..
-                    }
-                ) {
-                    let before = feed.terminal().scrollback_rows().unwrap();
-                    corrupt_page_suffix(&mut unit, unknown);
-                    feed.feed(&unit).unwrap();
-                    assert!(matches!(feed.next(), Err(Error::InvalidValue)));
-                    assert_eq!(feed.terminal().scrollback_rows().unwrap(), before);
-                    assert_eq!(feed.staged_capacity_bytes(), 0);
-                    checked = true;
-                    break;
-                }
-                feed.feed(&unit).unwrap();
-                feed.next().unwrap();
+            if tag == 3 {
+                unit.extend_from_slice(&EMPTY_PLACEMENTS);
             }
-            assert!(checked, "fixture must exercise an actual placement suffix");
+            if tag != 4 {
+                units.push(std::mem::take(&mut unit));
+            }
         }
+        assert!(unit.is_empty());
+        units
     }
 
     #[test]
     #[cfg(feature = "kitty-graphics")]
-    fn valid_unknown_records_are_checked_and_skipped_at_unit_boundaries() {
-        let mut source = source_with_images();
-        let mut bytes = Vec::new();
-        source.encode_snapshot(&mut bytes).unwrap();
-        let (prefix, units) = staged_units(&bytes);
-        let mut feed = FeedDecoder::new(bytes.len() + 64).unwrap();
+    fn owned_feed_accepts_complete_page_suffixes_without_reading_ahead() {
+        let bytes = snapshot();
+        let mut stock = Decoder::new_buf(&bytes).unwrap().ready().unwrap();
+        let prefix = stock.decoder().source_offset().unwrap();
+        let mut feed = FeedDecoder::new(bytes.len() + 16).unwrap();
         feed.feed(&bytes[..prefix]).unwrap();
         let mut feed = feed.ready().unwrap();
-        let mut placement_suffix = false;
-        let mut finished = false;
-        for mut unit in units {
-            if matches!(
-                validate_staged_history_unit(&unit).unwrap(),
-                StagedHistoryKind::Page {
-                    placements: true,
-                    ..
-                }
-            ) {
-                let mut offset = 0;
-                loop {
-                    let (tag, _, end) = staged_record(&unit, offset).unwrap();
-                    if tag == RECORD_TAG_PAGE {
-                        unit.splice(end..end, optional_record());
-                        placement_suffix = true;
-                        break;
-                    }
-                    offset = end;
-                }
+        assert_eq!(feed.staged_capacity_bytes(), 0);
+        feed.terminal_mut().vt_write(b"\rLIVE");
+        for unit in page_units(&bytes, prefix) {
+            for fragment in unit.chunks(11) {
+                feed.feed(fragment).unwrap();
             }
-            // Unknown optional records are legal before image, PAGE and FINISH
-            // units too; they must not be mistaken for extra progress steps.
-            feed.feed(&optional_record()).unwrap();
-            feed.feed(&unit).unwrap();
-            finished = feed.next().unwrap().is_none();
+            let expected = stock.next().unwrap().map(|p| p.kind().unwrap());
+            assert_eq!(feed.next().unwrap().map(|p| p.kind), expected);
+            assert_eq!(feed.staged_bytes(), 0);
+            assert_eq!(feed.staged_capacity_bytes(), 0);
         }
-        assert!(placement_suffix);
-        assert!(finished);
+        let terminal = feed.into_terminal();
+        assert!(terminal.scrollback_rows().unwrap() > 0);
     }
 
     #[test]
-    fn staged_feed_refuses_swapped_terminal_without_consuming_input() {
-        let mut source = source_terminal();
-        let captured = capture(&mut source).unwrap();
-        let mut feed = FeedDecoder::new(captured.bytes.len()).unwrap();
-        feed.feed(&captured.ready).unwrap();
+    fn bytes_after_finish_are_left_unread() {
+        let mut bytes = snapshot();
+        bytes.extend_from_slice(b"trailing");
+        let mut feed = FeedDecoder::new(bytes.len()).unwrap();
+        feed.feed(&bytes).unwrap();
         let mut feed = feed.ready().unwrap();
-        feed.feed(&captured.history[0].0).unwrap();
+        while feed.next().unwrap().is_some() {}
+        assert_eq!(feed.staged_bytes(), 8);
+        assert_eq!(feed.core.source.bytes, b"trailing");
+        assert!(matches!(feed.feed(b"more"), Err(Error::InvalidValue)));
+    }
+
+    #[test]
+    #[cfg(feature = "kitty-graphics")]
+    fn full_input_reports_native_image_progress() {
+        let mut source = Terminal::new(8, 3).unwrap();
+        source.vt_write(b"\x1b_Ga=t,f=32,s=1,v=1,i=7;/wAA/w==\x1b\\");
+        let mut bytes = Vec::new();
+        source.encode_snapshot(&mut bytes).unwrap();
+        let mut feed = FeedDecoder::new(bytes.len()).unwrap();
+        feed.feed(&bytes).unwrap();
+        let mut feed = feed.ready().unwrap();
+        let progress = feed.next().unwrap().unwrap();
+        assert_eq!(
+            progress.kind,
+            ProgressKind::Image {
+                id: 7,
+                frame: 1,
+                bytes: 4
+            }
+        );
+        assert_eq!(progress.screen, Screen::Primary);
+        assert_eq!((progress.rows, progress.remaining), (0, 0));
+        assert!(feed.next().unwrap().is_none());
+    }
+
+    #[test]
+    fn live_clear_or_incompatible_resize_discards_native_history() {
+        let bytes = snapshot();
+        for clear in [false, true] {
+            let mut feed = FeedDecoder::new(bytes.len()).unwrap();
+            feed.feed(&bytes).unwrap();
+            let mut feed = feed.ready().unwrap();
+            if clear {
+                feed.terminal_mut().vt_write(b"\x1b[3J");
+            } else {
+                feed.terminal_mut().resize(201, 3, 0, 0).unwrap();
+            }
+            let mut pages = 0;
+            while let Some(progress) = feed.next().unwrap() {
+                assert_eq!(progress.rows, 0);
+                assert!(matches!(progress.kind, ProgressKind::Page { rows: 0, .. }));
+                pages += 1;
+            }
+            assert!(pages > 1);
+        }
+    }
+
+    #[test]
+    fn bound_counts_unread_input_and_rejection_does_not_poison() {
+        assert!(matches!(FeedDecoder::new(0), Err(Error::InvalidValue)));
+        let mut feed = FeedDecoder::new(4).unwrap();
+        feed.feed(b"1234").unwrap();
+        assert!(matches!(feed.feed(b"5"), Err(Error::LimitExceeded)));
+        assert_eq!(feed.staged_bytes(), 4);
+
+        let mut reader = FeedReader::new(4).unwrap();
+        reader.feed(b"1234").unwrap();
+        reader.read_exact(&mut [0; 2]).unwrap();
+        reader.finish_operation();
+        reader.feed(b"56").unwrap();
+        assert_eq!(reader.bytes, b"3456");
+    }
+
+    #[test]
+    fn swapped_terminal_is_rejected_without_consuming_input() {
+        let bytes = snapshot();
+        let mut feed = FeedDecoder::new(bytes.len()).unwrap();
+        feed.feed(&bytes).unwrap();
+        let mut feed = feed.ready().unwrap();
+        let before = feed.staged_bytes();
         let original = std::mem::replace(feed.terminal_mut(), Terminal::new(200, 3).unwrap());
         assert!(matches!(feed.next(), Err(Error::InvalidValue)));
-        assert_eq!(feed.staged_bytes(), captured.history[0].0.len());
+        assert_eq!(feed.staged_bytes(), before);
         *feed.terminal_mut() = original;
         assert!(feed.next().unwrap().is_some());
     }
 
     #[test]
-    fn staged_feed_validates_history_after_live_reset_or_resize() {
-        for reset in [false, true] {
-            let mut source = source_terminal();
-            let captured = capture(&mut source).unwrap();
-            let mut feed = FeedDecoder::new(captured.bytes.len()).unwrap();
-            feed.feed(&captured.ready).unwrap();
-            let mut feed = feed.ready().unwrap();
-            if reset {
-                feed.terminal_mut().reset();
-            } else {
-                feed.terminal_mut().resize(201, 3, 0, 0).unwrap();
-            }
-            for (unit, _, rows, _) in captured.history {
-                feed.feed(&unit).unwrap();
-                let progress = feed.next_checked(rows).unwrap().unwrap();
-                assert_eq!(progress.authenticated_rows, rows);
-                assert_eq!(progress.rows, 0);
-            }
-            feed.feed(&captured.finish).unwrap();
-            assert!(feed.next_checked(0).unwrap().is_none());
-        }
-    }
-
-    #[test]
-    fn staged_feed_authenticates_but_discards_history_after_live_scrollback_clear() {
-        for pages_before_clear in [0, 1] {
-            let mut source = source_terminal();
-            let captured = capture(&mut source).unwrap();
-            assert!(captured.history.len() > pages_before_clear);
-            // With zero pages applied, CSI 3 J precedes even the first HISTORY
-            // manifest. The cut must be anchored at READY, not at that manifest.
-            assert_eq!(
-                staged_record(&captured.history[0].0, 0).unwrap().0,
-                RECORD_TAG_HISTORY
-            );
-            let mut feed = FeedDecoder::new(captured.bytes.len()).unwrap();
-            feed.feed(&captured.ready).unwrap();
-            let mut feed = feed.ready().unwrap();
-            for (unit, _, rows, _) in &captured.history[..pages_before_clear] {
-                feed.feed(unit).unwrap();
-                assert_eq!(feed.next_checked(*rows).unwrap().unwrap().rows, *rows);
-            }
-            feed.terminal_mut().vt_write(b"\x1b[3J");
-            assert_eq!(feed.terminal().scrollback_rows().unwrap(), 0);
-            for (unit, screen, rows, remaining) in &captured.history[pages_before_clear..] {
-                feed.feed(unit).unwrap();
-                let progress = feed.next_checked(*rows).unwrap().unwrap();
-                assert_eq!(progress.authenticated_rows, *rows);
-                assert_eq!(progress.screen, *screen);
-                assert_eq!(progress.rows, 0);
-                assert_eq!(progress.remaining, *remaining);
-                assert_eq!(
-                    progress.kind,
-                    ProgressKind::Page {
-                        rows: 0,
-                        remaining: *remaining
-                    }
-                );
-                assert_eq!(feed.terminal().scrollback_rows().unwrap(), 0);
-                assert_eq!(feed.staged_capacity_bytes(), 0);
-            }
-            feed.feed(&captured.finish).unwrap();
-            assert!(feed.next_checked(0).unwrap().is_none());
-            assert_eq!(feed.terminal().scrollback_rows().unwrap(), 0);
-            assert_eq!(feed.staged_capacity_bytes(), 0);
-        }
-    }
-
-    #[test]
-    fn staged_feed_routes_primary_history_with_alternate_screen_active() {
-        let mut source = source_terminal();
-        source.vt_write(b"\x1b[?1049hAlternate");
-        let mut bytes = Vec::new();
-        source.encode_snapshot(&mut bytes).unwrap();
-        let (prefix, units) = staged_units(&bytes);
+    fn decoding_error_releases_input_and_poisons_the_feed() {
+        let bytes = snapshot();
+        let ready = Decoder::new_buf(&bytes).unwrap().ready().unwrap();
+        let prefix = ready.decoder().source_offset().unwrap();
         let mut feed = FeedDecoder::new(bytes.len()).unwrap();
         feed.feed(&bytes[..prefix]).unwrap();
         let mut feed = feed.ready().unwrap();
-        let mut pages = 0;
-        for unit in units {
-            feed.feed(&unit).unwrap();
-            if let Some(progress) = feed.next().unwrap() {
-                assert_eq!(progress.screen, Screen::Primary);
-                pages += 1;
-            }
-        }
-        assert!(pages > 1);
-    }
-
-    #[test]
-    fn staged_feed_rejects_corrupt_page_without_retaining_it() {
-        let mut source = source_terminal();
-        let captured = capture(&mut source).unwrap();
-        let mut feed = FeedDecoder::new(captured.bytes.len()).unwrap();
-        feed.feed(&captured.ready).unwrap();
-        let mut feed = feed.ready().unwrap();
-        let before = feed.terminal().scrollback_rows().unwrap();
-        let mut unit = captured.history[0].0.clone();
-        *unit.last_mut().unwrap() ^= 1;
-        feed.feed(&unit).unwrap();
+        feed.feed(&[0xff]).unwrap();
         assert!(feed.next().is_err());
-        assert_eq!(feed.terminal().scrollback_rows().unwrap(), before);
         assert_eq!(feed.staged_capacity_bytes(), 0);
-        assert!(matches!(feed.feed(&unit), Err(Error::InvalidValue)));
+        assert!(matches!(feed.feed(b"more"), Err(Error::InvalidValue)));
+        assert!(matches!(feed.next(), Err(Error::InvalidValue)));
     }
 
     #[test]
-    fn capture_does_not_change_compressed_history_representation() {
-        let mut source = source_terminal();
-        source
-            .compress(crate::terminal::CompressionMode::Full)
-            .unwrap();
-        let before = source.memory_usage().unwrap();
-        let captured = capture(&mut source).unwrap();
-        let after = source.memory_usage().unwrap();
-        assert_eq!(
-            after.primary_compressed_pages,
-            before.primary_compressed_pages
-        );
-        let restored = Decoder::new_buf(&captured.bytes).unwrap().decode().unwrap();
-        assert_eq!(
-            restored.scrollback_rows().unwrap(),
-            source.scrollback_rows().unwrap()
-        );
-    }
-
-    struct Captured {
-        bytes: Vec<u8>,
-        ready: Vec<u8>,
-        history: Vec<(Vec<u8>, Screen, usize, u32)>,
-        finish: Vec<u8>,
-    }
-
-    fn source_terminal() -> Terminal<'static, 'static> {
-        let mut terminal = Terminal::new(200, 3).expect("terminal");
-        terminal
-            .set_scrollback_max_lines(Some(5000))
-            .expect("scrollback limit");
-        terminal
-            .set_scrollback_max_bytes(Some(usize::MAX))
-            .expect("unlimited scrollback bytes");
-        for row in 0..3000 {
-            terminal.vt_write(format!("row {row:03}\r\n").as_bytes());
+    fn retained_continuation_is_live_at_ready() {
+        for pending in [b"".as_slice(), b"\x1b[31"] {
+            let mut source = Terminal::new(8, 2).unwrap();
+            source.set_continuation_max_bytes(1024).unwrap();
+            source.vt_write(pending);
+            let mut bytes = Vec::new();
+            source.encode_snapshot(&mut bytes).unwrap();
+            let mut feed = FeedDecoder::new(bytes.len()).unwrap();
+            feed.set_max_continuation_bytes(1024).unwrap();
+            feed.set_retain_continuation(true).unwrap();
+            feed.feed(&bytes).unwrap();
+            let mut feed = feed.ready().unwrap();
+            assert_eq!(feed.terminal().continuation_max_bytes().unwrap(), 1024);
+            let mut continuation = [0; 16];
+            let len = feed.terminal().continuation_buf(&mut continuation).unwrap();
+            assert_eq!(len.unwrap_or(0), pending.len());
+            assert_eq!(&continuation[..pending.len()], pending);
+            feed.terminal_mut().vt_write(b"m");
+            assert!(feed.next().unwrap().is_none());
         }
-        assert!(terminal.scrollback_rows().expect("scrollback rows") > 1000);
-        terminal
-    }
-
-    /// Use upstream's writer and decoder to prepare independent feed fixtures.
-    fn capture(terminal: &mut Terminal<'_, '_>) -> Result<Captured> {
-        let mut bytes = Vec::new();
-        terminal.encode_snapshot(&mut bytes)?;
-        let (prefix, mut units) = staged_units(&bytes);
-        let ready = bytes[..prefix].to_vec();
-        let finish = units.pop().expect("FINISH unit");
-        let mut decoder = Decoder::new_buf(&bytes)?.ready()?;
-        let mut history = Vec::new();
-        for unit in units {
-            let progress = decoder.next()?.expect("history progress");
-            let ProgressKind::Page { rows, remaining } = progress.kind()? else {
-                panic!("text-only fixture emitted image pixels")
-            };
-            history.push((unit, progress.screen()?, rows, remaining));
-        }
-        assert!(decoder.next()?.is_none(), "authenticated FINISH");
-        drop(decoder);
-        Ok(Captured {
-            bytes,
-            ready,
-            history,
-            finish,
-        })
-    }
-
-    #[test]
-    fn owned_feed_restores_stock_snapshot_history_after_source_mutation() {
-        let mut terminal = source_terminal();
-        let captured = capture(&mut terminal).expect("stock snapshot");
-        assert!(
-            captured.history.len() > 1,
-            "snapshot should contain multiple history pages"
-        );
-        terminal.resize(201, 3, 0, 0).expect("source resize");
-        terminal.reset();
-        terminal
-            .set_scrollback_max_lines(Some(1))
-            .expect("source prune");
-        drop(terminal);
-
-        let mut decoder = FeedDecoder::new(captured.bytes.len()).expect("feed decoder");
-        for fragment in captured.ready.chunks(1) {
-            decoder.feed(fragment).expect("READY fragment");
-        }
-        assert!(decoder.staged_capacity_bytes() >= decoder.staged_bytes());
-        let mut decoder = decoder.ready().expect("authenticated READY");
-        assert_eq!(decoder.staged_bytes(), 0, "READY storage is released");
-        assert_eq!(
-            decoder.staged_capacity_bytes(),
-            0,
-            "READY capacity is released"
-        );
-        decoder.terminal_mut().vt_write(b"\rLIVE");
-
-        for (unit, screen, rows, remaining) in &captured.history {
-            for fragment in unit.chunks(1) {
-                decoder.feed(fragment).expect("history fragment");
-            }
-            let progress = decoder.next().expect("valid history").expect("page");
-            assert_eq!(progress.screen, *screen);
-            assert_eq!(progress.authenticated_rows, *rows);
-            assert_eq!(progress.rows, *rows);
-            assert_eq!(progress.remaining, *remaining);
-            assert_eq!(decoder.staged_bytes(), 0, "page storage is released");
-            assert_eq!(
-                decoder.staged_capacity_bytes(),
-                0,
-                "page capacity is released"
-            );
-        }
-        decoder.feed(&captured.finish).expect("FINISH bytes");
-        assert!(decoder.next().expect("authenticated FINISH").is_none());
-        assert!(decoder.terminal().scrollback_rows().expect("rows") > 0);
-    }
-
-    #[test]
-    fn staged_decoder_rejects_truncated_finish_instead_of_finishing() {
-        let mut terminal = source_terminal();
-        let captured = capture(&mut terminal).expect("capture");
-        let mut decoder = FeedDecoder::new(captured.bytes.len()).expect("decoder");
-        decoder.feed(&captured.ready).expect("READY");
-        let mut decoder = decoder.ready().expect("ready");
-        for (unit, ..) in &captured.history {
-            decoder.feed(unit).expect("history");
-            assert!(decoder.next().expect("page").is_some());
-        }
-        decoder
-            .feed(&captured.finish[..captured.finish.len() - 1])
-            .expect("truncated FINISH");
-        assert!(matches!(decoder.next(), Err(Error::InvalidValue)));
-        assert_eq!(decoder.staged_bytes(), 0, "failed staging is released");
-    }
-
-    #[test]
-    fn staged_decoder_rejects_a_truncated_history_page() {
-        let mut terminal = source_terminal();
-        let captured = capture(&mut terminal).expect("capture");
-        let mut decoder = FeedDecoder::new(captured.bytes.len()).expect("decoder");
-        decoder.feed(&captured.ready).expect("READY");
-        let mut decoder = decoder.ready().expect("ready");
-        let first = &captured.history[0].0;
-        decoder
-            .feed(&first[..first.len() - 1])
-            .expect("truncated history");
-        assert!(matches!(decoder.next(), Err(Error::InvalidValue)));
-        assert_eq!(decoder.staged_bytes(), 0, "failed staging is released");
-    }
-
-    #[test]
-    fn staged_decoder_rejects_trailing_record_before_terminal_mutation() {
-        let mut terminal = source_terminal();
-        let captured = capture(&mut terminal).expect("capture");
-        assert!(captured.history.len() > 1);
-        let mut decoder = FeedDecoder::new(captured.bytes.len()).expect("decoder");
-        decoder.feed(&captured.ready).expect("READY");
-        let mut decoder = decoder.ready().expect("ready");
-        let rows_before = decoder.terminal().scrollback_rows().expect("rows");
-
-        decoder.feed(&captured.history[0].0).expect("first page");
-        decoder.feed(&captured.history[1].0).expect("trailing page");
-        assert!(matches!(decoder.next(), Err(Error::InvalidValue)));
-        assert_eq!(
-            decoder.terminal().scrollback_rows().expect("rows"),
-            rows_before,
-            "framing rejection must precede native page application"
-        );
-        assert_eq!(decoder.staged_capacity_bytes(), 0);
-    }
-
-    #[test]
-    fn staged_decoder_rejects_row_mismatch_before_terminal_mutation() {
-        let mut terminal = source_terminal();
-        let captured = capture(&mut terminal).expect("capture");
-        let (unit, _, rows, _) = &captured.history[0];
-        let mut decoder = FeedDecoder::new(captured.bytes.len()).expect("decoder");
-        decoder.feed(&captured.ready).expect("READY");
-        let mut decoder = decoder.ready().expect("ready");
-        let rows_before = decoder.terminal().scrollback_rows().expect("rows");
-
-        decoder.feed(unit).expect("page");
-        assert!(matches!(
-            decoder.next_checked(rows + 1),
-            Err(Error::InvalidValue)
-        ));
-        assert_eq!(
-            decoder.terminal().scrollback_rows().expect("rows"),
-            rows_before
-        );
-        assert_eq!(decoder.staged_capacity_bytes(), 0);
-    }
-
-    #[test]
-    fn staged_decoder_authenticates_pages_discarded_by_local_limits() {
-        let mut terminal = source_terminal();
-        let captured = capture(&mut terminal).expect("capture");
-        let mut decoder = FeedDecoder::new(captured.bytes.len()).expect("decoder");
-        decoder.feed(&captured.ready).expect("READY");
-        let mut decoder = decoder.ready().expect("ready");
-        decoder
-            .terminal_mut()
-            .set_scrollback_max_lines(Some(1))
-            .expect("local history limit");
-
-        let mut discarded = false;
-        for (unit, _, expected_rows, _) in &captured.history {
-            decoder.feed(unit).expect("valid page");
-            let progress = decoder
-                .next_checked(*expected_rows)
-                .expect("authenticated page")
-                .expect("page outcome");
-            assert_eq!(progress.authenticated_rows, *expected_rows);
-            assert!(progress.rows == 0 || progress.rows == *expected_rows);
-            discarded |= progress.rows == 0;
-        }
-        assert!(
-            discarded,
-            "the bounded projection must discard a large page"
-        );
-
-        decoder.feed(&captured.finish).expect("FINISH");
-        assert!(
-            decoder
-                .next_checked(0)
-                .expect("authenticated FINISH")
-                .is_none()
-        );
-    }
-
-    #[test]
-    fn zero_history_still_authenticates_finish() {
-        let mut terminal = Terminal::new(80, 24).expect("terminal");
-        let captured = capture(&mut terminal).expect("capture");
-        assert!(captured.history.is_empty());
-
-        let mut decoder = FeedDecoder::new(captured.bytes.len()).expect("decoder");
-        decoder.feed(&captured.ready).expect("READY");
-        let mut decoder = decoder.ready().expect("ready");
-        decoder
-            .feed(&captured.finish)
-            .expect("history manifests and FINISH");
-        assert!(
-            decoder
-                .next_checked(0)
-                .expect("authenticated FINISH")
-                .is_none()
-        );
     }
 }
 

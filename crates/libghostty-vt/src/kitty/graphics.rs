@@ -620,6 +620,20 @@ pub struct Image<'t> {
     inner: Ref<'t, ffi::KittyGraphicsImageImpl>,
 }
 
+/// Reusable iterator over every resident image, including unplaced images.
+///
+/// Populate it with [`Self::update`]. Iteration order is unspecified.
+#[derive(Debug)]
+pub struct ImageIterator<'alloc> {
+    inner: Object<'alloc, ffi::KittyGraphicsImageIteratorImpl>,
+}
+
+/// An image iteration borrowing both its iterator and the graphics storage.
+#[derive(Debug)]
+pub struct ImageIteration<'t, 'alloc> {
+    iterator: &'t mut ImageIterator<'alloc>,
+}
+
 /// Opaque reference to a Kitty graphics placement iterator.
 ///
 /// It lists every placement in the storage, including virtual placements and
@@ -919,40 +933,20 @@ impl<'t> Graphics<'t> {
     /// order. An error leaves `ids` empty.
     pub fn image_ids_into(&self, ids: &mut Vec<u32>) -> Result<()> {
         ids.clear();
-        loop {
-            let capacity = ids.capacity();
-            let mut count = 0;
-            // SAFETY: Native initializes `count` entries only on success and
-            // never retains the pointer. The vector stays empty on failure.
-            let result = unsafe {
-                ffi::ghostty_kitty_graphics_image_ids(
-                    self.inner.as_raw(),
-                    if capacity == 0 {
-                        std::ptr::null_mut()
-                    } else {
-                        ids.as_mut_ptr()
-                    },
-                    capacity,
-                    &raw mut count,
-                )
-            };
-            if result == ffi::Result::OUT_OF_SPACE {
-                if count <= capacity {
-                    return Err(Error::InvalidValue);
-                }
-                ids.try_reserve_exact(count)
-                    .map_err(|_| Error::OutOfMemory)?;
-                continue;
+        let result = (|| {
+            let mut iterator = ImageIterator::new()?;
+            for image in iterator.update(self)? {
+                let id = image.id()?;
+                ids.try_reserve(1).map_err(|_| Error::OutOfMemory)?;
+                ids.push(id);
             }
-            from_result(result)?;
-            if count > capacity {
-                return Err(Error::InvalidValue);
-            }
-            // SAFETY: Success initialized exactly `count` entries.
-            unsafe { ids.set_len(count) };
             ids.sort_unstable();
-            return Ok(());
+            Ok(())
+        })();
+        if result.is_err() {
+            ids.clear();
         }
+        result
     }
 
     fn get<T>(&self, tag: ffi::KittyGraphicsData::Type) -> Result<T> {
@@ -1120,6 +1114,87 @@ impl<'t> Image<'t> {
     /// storage limit even though [`Image::data`] is not available yet.
     pub fn data_len(&self) -> Result<usize> {
         self.get(ffi::KittyGraphicsImageData::EXPECTED_LEN)
+    }
+}
+
+impl<'alloc> ImageIterator<'alloc> {
+    /// Allocate an image iterator using the default allocator.
+    pub fn new() -> Result<Self> {
+        // SAFETY: NULL selects the default allocator.
+        unsafe { Self::new_inner(std::ptr::null()) }
+    }
+
+    /// Allocate an image iterator using a borrowed custom allocator.
+    pub fn new_with_alloc<'ctx: 'alloc>(alloc: &'alloc Allocator<'ctx>) -> Result<Self> {
+        // SAFETY: The iterator cannot outlive this allocator borrow.
+        unsafe { Self::new_inner(alloc.to_raw()) }
+    }
+
+    unsafe fn new_inner(alloc: *const ffi::Allocator) -> Result<Self> {
+        let mut raw: ffi::KittyGraphicsImageIterator = std::ptr::null_mut();
+        let result = unsafe { ffi::ghostty_kitty_graphics_image_iterator_new(alloc, &raw mut raw) };
+        from_result(result)?;
+        Ok(Self {
+            inner: Object::new(raw)?,
+        })
+    }
+
+    /// Populate the iterator with the graphics storage's resident images.
+    ///
+    /// The storage and terminal remain immutably borrowed while the iteration
+    /// or any yielded image is alive.
+    ///
+    /// ```compile_fail,E0502
+    /// # use libghostty_vt::{Terminal, kitty::graphics::ImageIterator};
+    /// let mut terminal = Terminal::new(80, 24).unwrap();
+    /// let graphics = terminal.kitty_graphics().unwrap().unwrap();
+    /// let mut iterator = ImageIterator::new().unwrap();
+    /// let mut images = iterator.update(&graphics).unwrap();
+    /// terminal.reset();
+    /// images.next();
+    /// ```
+    pub fn update<'t>(
+        &'t mut self,
+        graphics: &'t Graphics<'_>,
+    ) -> Result<ImageIteration<'t, 'alloc>> {
+        let mut raw = self.inner.as_raw();
+        // The getter populates the allocated iterator through this handle; it
+        // does not replace it. Pass the C handle, not the Rust owner's layout.
+        let result = unsafe {
+            ffi::ghostty_kitty_graphics_get(
+                graphics.inner.as_raw(),
+                ffi::KittyGraphicsData::IMAGE_ITERATOR,
+                (&raw mut raw).cast(),
+            )
+        };
+        from_result(result)?;
+        Ok(ImageIteration { iterator: self })
+    }
+}
+
+impl Drop for ImageIterator<'_> {
+    fn drop(&mut self) {
+        unsafe { ffi::ghostty_kitty_graphics_image_iterator_free(self.inner.as_raw()) };
+    }
+}
+
+impl<'t> Iterator for ImageIteration<'t, '_> {
+    type Item = Image<'t>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if !unsafe { ffi::ghostty_kitty_graphics_image_iterator_next(self.iterator.inner.as_raw()) }
+        {
+            return None;
+        }
+        let raw = unsafe {
+            ffi::ghostty_kitty_graphics_image_iterator_get_image(self.iterator.inner.as_raw())
+        };
+        Some(Image {
+            // Native's successful next selects a borrowed image. Its lifetime
+            // is tied to the graphics borrow established by update, not to
+            // the current iterator position.
+            inner: Ref::new(raw.cast_mut()).ok()?,
+        })
     }
 }
 

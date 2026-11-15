@@ -47,14 +47,17 @@ impl EncoderOptions {
     /// Capture exactly the options that
     /// [`Encoder::set_options_from_terminal`] would apply.
     pub fn from_terminal(terminal: &Terminal<'_, '_>) -> Result<Self> {
-        let mut raw = ffi::sized!(ffi::MouseEncoderTerminalOptions);
-        let result = unsafe {
-            ffi::ghostty_mouse_encoder_terminal_options(terminal.inner.as_raw(), &raw mut raw)
-        };
-        from_result(result)?;
+        // Native resolves simultaneous tracking and format modes. Query the
+        // configured encoder rather than adding a second C snapshot contract.
+        let mut encoder = Encoder::new()?;
+        encoder.set_options_from_terminal(terminal);
         Ok(Self {
-            tracking_mode: TrackingMode::try_from(raw.event).map_err(|_| Error::Unsupported)?,
-            format: Format::try_from(raw.format).map_err(|_| Error::Unsupported)?,
+            tracking_mode: TrackingMode::try_from(
+                encoder.get::<ffi::MouseTrackingMode::Type>(Opt::EVENT)?,
+            )
+            .map_err(|_| Error::Unsupported)?,
+            format: Format::try_from(encoder.get::<ffi::MouseFormat::Type>(Opt::FORMAT)?)
+                .map_err(|_| Error::Unsupported)?,
         })
     }
 }
@@ -88,6 +91,16 @@ impl<'alloc> Encoder<'alloc> {
         value: *const std::ffi::c_void,
     ) -> ffi::Result::Type {
         unsafe { ffi::ghostty_mouse_encoder_set(self.0.as_raw(), option, value) }
+    }
+
+    fn get<T>(&self, option: Opt::Type) -> Result<T> {
+        let mut value = MaybeUninit::<T>::zeroed();
+        let result = unsafe {
+            ffi::ghostty_mouse_encoder_get(self.0.as_raw(), option, value.as_mut_ptr().cast())
+        };
+        from_result(result)?;
+        // SAFETY: Each private call selects the documented output type.
+        Ok(unsafe { value.assume_init() })
     }
 
     /// Encode a key event into a terminal escape sequence.

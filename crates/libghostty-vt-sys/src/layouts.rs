@@ -965,50 +965,10 @@ mod layout_0 {
     };
     #[allow(clippy::unnecessary_operation, clippy::identity_op)]
     const _: () = {
-        ["Size of KeyEncoderTerminalOptions"]
-            [::std::mem::size_of::<KeyEncoderTerminalOptions>() - 16usize];
-        ["Alignment of KeyEncoderTerminalOptions"]
-            [::std::mem::align_of::<KeyEncoderTerminalOptions>() - 8usize];
-        ["Offset of field: KeyEncoderTerminalOptions::size"]
-            [::std::mem::offset_of!(KeyEncoderTerminalOptions, size) - 0usize];
-        ["Offset of field: KeyEncoderTerminalOptions::cursor_key_application"]
-            [::std::mem::offset_of!(KeyEncoderTerminalOptions, cursor_key_application) - 8usize];
-        ["Offset of field: KeyEncoderTerminalOptions::keypad_key_application"]
-            [::std::mem::offset_of!(KeyEncoderTerminalOptions, keypad_key_application) - 9usize];
-        ["Offset of field: KeyEncoderTerminalOptions::ignore_keypad_with_numlock"][::std::mem::offset_of!(
-            KeyEncoderTerminalOptions,
-            ignore_keypad_with_numlock
-        ) - 10usize];
-        ["Offset of field: KeyEncoderTerminalOptions::alt_esc_prefix"]
-            [::std::mem::offset_of!(KeyEncoderTerminalOptions, alt_esc_prefix) - 11usize];
-        ["Offset of field: KeyEncoderTerminalOptions::modify_other_keys_state_2"][::std::mem::offset_of!(
-            KeyEncoderTerminalOptions,
-            modify_other_keys_state_2
-        ) - 12usize];
-        ["Offset of field: KeyEncoderTerminalOptions::kitty_flags"]
-            [::std::mem::offset_of!(KeyEncoderTerminalOptions, kitty_flags) - 13usize];
-        ["Offset of field: KeyEncoderTerminalOptions::backarrow_key_mode"]
-            [::std::mem::offset_of!(KeyEncoderTerminalOptions, backarrow_key_mode) - 14usize];
-    };
-    #[allow(clippy::unnecessary_operation, clippy::identity_op)]
-    const _: () = {
         ["Size of MousePosition"][::std::mem::size_of::<MousePosition>() - 8usize];
         ["Alignment of MousePosition"][::std::mem::align_of::<MousePosition>() - 4usize];
         ["Offset of field: MousePosition::x"][::std::mem::offset_of!(MousePosition, x) - 0usize];
         ["Offset of field: MousePosition::y"][::std::mem::offset_of!(MousePosition, y) - 4usize];
-    };
-    #[allow(clippy::unnecessary_operation, clippy::identity_op)]
-    const _: () = {
-        ["Size of MouseEncoderTerminalOptions"]
-            [::std::mem::size_of::<MouseEncoderTerminalOptions>() - 16usize];
-        ["Alignment of MouseEncoderTerminalOptions"]
-            [::std::mem::align_of::<MouseEncoderTerminalOptions>() - 8usize];
-        ["Offset of field: MouseEncoderTerminalOptions::size"]
-            [::std::mem::offset_of!(MouseEncoderTerminalOptions, size) - 0usize];
-        ["Offset of field: MouseEncoderTerminalOptions::event"]
-            [::std::mem::offset_of!(MouseEncoderTerminalOptions, event) - 8usize];
-        ["Offset of field: MouseEncoderTerminalOptions::format"]
-            [::std::mem::offset_of!(MouseEncoderTerminalOptions, format) - 12usize];
     };
     #[allow(clippy::unnecessary_operation, clippy::identity_op)]
     const _: () = {
@@ -1884,48 +1844,10 @@ mod layout_1 {
     };
     #[allow(clippy::unnecessary_operation, clippy::identity_op)]
     const _: () = {
-        ["Size of KeyEncoderTerminalOptions"]
-            [::std::mem::size_of::<KeyEncoderTerminalOptions>() - 12usize];
-        ["Alignment of KeyEncoderTerminalOptions"]
-            [::std::mem::align_of::<KeyEncoderTerminalOptions>() - 4usize];
-        ["Offset of field: KeyEncoderTerminalOptions::size"]
-            [::std::mem::offset_of!(KeyEncoderTerminalOptions, size) - 0usize];
-        ["Offset of field: KeyEncoderTerminalOptions::cursor_key_application"]
-            [::std::mem::offset_of!(KeyEncoderTerminalOptions, cursor_key_application) - 4usize];
-        ["Offset of field: KeyEncoderTerminalOptions::keypad_key_application"]
-            [::std::mem::offset_of!(KeyEncoderTerminalOptions, keypad_key_application) - 5usize];
-        ["Offset of field: KeyEncoderTerminalOptions::ignore_keypad_with_numlock"][::std::mem::offset_of!(
-            KeyEncoderTerminalOptions,
-            ignore_keypad_with_numlock
-        ) - 6usize];
-        ["Offset of field: KeyEncoderTerminalOptions::alt_esc_prefix"]
-            [::std::mem::offset_of!(KeyEncoderTerminalOptions, alt_esc_prefix) - 7usize];
-        ["Offset of field: KeyEncoderTerminalOptions::modify_other_keys_state_2"]
-            [::std::mem::offset_of!(KeyEncoderTerminalOptions, modify_other_keys_state_2) - 8usize];
-        ["Offset of field: KeyEncoderTerminalOptions::kitty_flags"]
-            [::std::mem::offset_of!(KeyEncoderTerminalOptions, kitty_flags) - 9usize];
-        ["Offset of field: KeyEncoderTerminalOptions::backarrow_key_mode"]
-            [::std::mem::offset_of!(KeyEncoderTerminalOptions, backarrow_key_mode) - 10usize];
-    };
-    #[allow(clippy::unnecessary_operation, clippy::identity_op)]
-    const _: () = {
         ["Size of MousePosition"][::std::mem::size_of::<MousePosition>() - 8usize];
         ["Alignment of MousePosition"][::std::mem::align_of::<MousePosition>() - 4usize];
         ["Offset of field: MousePosition::x"][::std::mem::offset_of!(MousePosition, x) - 0usize];
         ["Offset of field: MousePosition::y"][::std::mem::offset_of!(MousePosition, y) - 4usize];
-    };
-    #[allow(clippy::unnecessary_operation, clippy::identity_op)]
-    const _: () = {
-        ["Size of MouseEncoderTerminalOptions"]
-            [::std::mem::size_of::<MouseEncoderTerminalOptions>() - 12usize];
-        ["Alignment of MouseEncoderTerminalOptions"]
-            [::std::mem::align_of::<MouseEncoderTerminalOptions>() - 4usize];
-        ["Offset of field: MouseEncoderTerminalOptions::size"]
-            [::std::mem::offset_of!(MouseEncoderTerminalOptions, size) - 0usize];
-        ["Offset of field: MouseEncoderTerminalOptions::event"]
-            [::std::mem::offset_of!(MouseEncoderTerminalOptions, event) - 4usize];
-        ["Offset of field: MouseEncoderTerminalOptions::format"]
-            [::std::mem::offset_of!(MouseEncoderTerminalOptions, format) - 8usize];
     };
     #[allow(clippy::unnecessary_operation, clippy::identity_op)]
     const _: () = {
