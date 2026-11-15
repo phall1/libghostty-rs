@@ -53,21 +53,16 @@ pub struct EncoderOptions {
 impl EncoderOptions {
     /// Capture exactly the options that
     /// [`Encoder::set_options_from_terminal`] would apply.
+    ///
+    /// This allocates a temporary encoder. For repeated captures, reuse an
+    /// encoder, set its options from the terminal, then call [`Encoder::options`].
     pub fn from_terminal(terminal: &Terminal<'_, '_>) -> Result<Self> {
         // Let the native encoder resolve terminal modes rather than mirroring
         // its precedence rules in Rust. Getters read the same options setters
         // accept, so no parallel C snapshot struct is needed.
         let mut encoder = Encoder::new()?;
         encoder.set_options_from_terminal(terminal);
-        Ok(Self {
-            cursor_key_application: encoder.get(Opt::CURSOR_KEY_APPLICATION)?,
-            keypad_key_application: encoder.get(Opt::KEYPAD_KEY_APPLICATION)?,
-            ignore_keypad_with_numlock: encoder.get(Opt::IGNORE_KEYPAD_WITH_NUMLOCK)?,
-            alt_esc_prefix: encoder.get(Opt::ALT_ESC_PREFIX)?,
-            modify_other_keys_state_2: encoder.get(Opt::MODIFY_OTHER_KEYS_STATE_2)?,
-            kitty_flags: KittyKeyFlags::from_bits_retain(encoder.get(Opt::KITTY_FLAGS)?),
-            backarrow_key_mode: encoder.get(Opt::BACKARROW_KEY_MODE)?,
-        })
+        encoder.options()
     }
 }
 
@@ -110,6 +105,24 @@ impl<'alloc> Encoder<'alloc> {
         from_result(result)?;
         // SAFETY: Each private call selects the documented output type.
         Ok(unsafe { value.assume_init() })
+    }
+
+    /// Read a copyable snapshot of the current encoder settings without
+    /// allocating or modifying the encoder.
+    ///
+    /// Call [`Self::set_options_from_terminal`] first to capture effective
+    /// terminal modes with a reusable encoder. Like [`EncoderOptions`], this
+    /// excludes the independently configured macOS option-as-alt setting.
+    pub fn options(&self) -> Result<EncoderOptions> {
+        Ok(EncoderOptions {
+            cursor_key_application: self.get(Opt::CURSOR_KEY_APPLICATION)?,
+            keypad_key_application: self.get(Opt::KEYPAD_KEY_APPLICATION)?,
+            ignore_keypad_with_numlock: self.get(Opt::IGNORE_KEYPAD_WITH_NUMLOCK)?,
+            alt_esc_prefix: self.get(Opt::ALT_ESC_PREFIX)?,
+            modify_other_keys_state_2: self.get(Opt::MODIFY_OTHER_KEYS_STATE_2)?,
+            kitty_flags: KittyKeyFlags::from_bits_retain(self.get(Opt::KITTY_FLAGS)?),
+            backarrow_key_mode: self.get(Opt::BACKARROW_KEY_MODE)?,
+        })
     }
 
     /// Encode a key event into a terminal escape sequence.
@@ -746,6 +759,29 @@ mod snapshot_tests {
     }
 
     #[test]
+    fn options_reads_reusable_encoder_without_resetting_platform_settings() {
+        let mut encoder = Encoder::new().unwrap();
+        let expected = EncoderOptions {
+            cursor_key_application: true,
+            keypad_key_application: false,
+            ignore_keypad_with_numlock: true,
+            alt_esc_prefix: false,
+            modify_other_keys_state_2: true,
+            kitty_flags: KittyKeyFlags::ALL,
+            backarrow_key_mode: true,
+        };
+        encoder.set_options(expected);
+        encoder.set_macos_option_as_alt(OptionAsAlt::True);
+        assert_eq!(encoder.options().unwrap(), expected);
+        assert_eq!(
+            encoder
+                .get::<ffi::OptionAsAlt::Type>(Opt::MACOS_OPTION_AS_ALT)
+                .unwrap(),
+            ffi::OptionAsAlt::TRUE
+        );
+    }
+
+    #[test]
     fn snapshot_apply_is_byte_identical_to_live_terminal() {
         let terminal = terminal_with_modes();
         let options = EncoderOptions::from_terminal(&terminal).expect("capture");
@@ -773,6 +809,7 @@ mod snapshot_tests {
 
             let mut live = Encoder::new().expect("live encoder");
             live.set_options_from_terminal(&terminal);
+            assert_eq!(live.options().unwrap(), options);
             let mut snapshot = Encoder::new().expect("snapshot encoder");
             snapshot.set_options(options);
             let mut live_bytes = Vec::new();

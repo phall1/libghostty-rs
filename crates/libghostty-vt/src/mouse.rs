@@ -46,19 +46,15 @@ pub struct EncoderOptions {
 impl EncoderOptions {
     /// Capture exactly the options that
     /// [`Encoder::set_options_from_terminal`] would apply.
+    ///
+    /// This allocates a temporary encoder. For repeated captures, reuse an
+    /// encoder, set its options from the terminal, then call [`Encoder::options`].
     pub fn from_terminal(terminal: &Terminal<'_, '_>) -> Result<Self> {
         // Native resolves simultaneous tracking and format modes. Query the
         // configured encoder rather than adding a second C snapshot contract.
         let mut encoder = Encoder::new()?;
         encoder.set_options_from_terminal(terminal);
-        Ok(Self {
-            tracking_mode: TrackingMode::try_from(
-                encoder.get::<ffi::MouseTrackingMode::Type>(Opt::EVENT)?,
-            )
-            .map_err(|_| Error::Unsupported)?,
-            format: Format::try_from(encoder.get::<ffi::MouseFormat::Type>(Opt::FORMAT)?)
-                .map_err(|_| Error::Unsupported)?,
-        })
+        encoder.options()
     }
 }
 
@@ -101,6 +97,23 @@ impl<'alloc> Encoder<'alloc> {
         from_result(result)?;
         // SAFETY: Each private call selects the documented output type.
         Ok(unsafe { value.assume_init() })
+    }
+
+    /// Read the current tracking mode and output format without allocating or
+    /// modifying the encoder, including its motion deduplication state.
+    ///
+    /// Call [`Self::set_options_from_terminal`] first to capture effective
+    /// terminal modes with a reusable encoder. Renderer geometry and button
+    /// state are independent settings and are not included.
+    pub fn options(&self) -> Result<EncoderOptions> {
+        Ok(EncoderOptions {
+            tracking_mode: TrackingMode::try_from(
+                self.get::<ffi::MouseTrackingMode::Type>(Opt::EVENT)?,
+            )
+            .map_err(|_| Error::Unsupported)?,
+            format: Format::try_from(self.get::<ffi::MouseFormat::Type>(Opt::FORMAT)?)
+                .map_err(|_| Error::Unsupported)?,
+        })
     }
 
     /// Encode a key event into a terminal escape sequence.
@@ -586,6 +599,9 @@ mod snapshot_tests {
         let first = encode(&mut live, &event);
         assert!(!first.is_empty());
         assert_eq!(encode(&mut snapshot, &event), first);
+        // Reading options must not reset motion deduplication or button state.
+        assert_eq!(live.options().unwrap(), options);
+        assert_eq!(snapshot.options().unwrap(), options);
         assert_eq!(encode(&mut live, &event).len(), 0);
         assert_eq!(encode(&mut snapshot, &event).len(), 0);
         live.set_options_from_terminal(&terminal);
@@ -629,6 +645,7 @@ mod snapshot_tests {
             live.set_options_from_terminal(&terminal)
                 .set_size(size)
                 .unwrap();
+            assert_eq!(live.options().unwrap(), options);
             let mut snapshot = Encoder::new().expect("snapshot encoder");
             snapshot.set_options(options).set_size(size).unwrap();
             let mut live_bytes = Vec::new();
