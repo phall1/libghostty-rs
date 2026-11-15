@@ -19,7 +19,7 @@
       inputs.nixpkgs.follows = "nixpkgs";
     };
     ghostty = {
-      # vt-1.0.0 plus the narrow phux APIs; keep in sync with build.rs.
+      # Pinned engine and native API fixes; keep in sync with build.rs.
       url = "github:phall1/ghostty/e82b76e98a2609bf093adc5a9d9bc0adfc0f9c4a";
     };
   };
@@ -89,8 +89,8 @@
             (previousAttrs.patches or [])
             ++ ["${ghostty}/nix/patches/zig-0.17-ios-process-replace.patch"];
         });
-        # The vanilla 1.0 release lacks this fork's staged decoder and helpers.
-        # Both link modes must use the same pinned fork, never that archive.
+        # Both link modes must use the same pinned engine and native API fixes,
+        # never a vanilla release archive with a different ABI.
         ghosttyLib = ghostty.packages.${system}.libghostty-vt;
 
         miriCommand = pkgs.writeShellApplication {

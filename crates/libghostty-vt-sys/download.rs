@@ -18,15 +18,11 @@ const PREBUILT_BASE_URL: &str = "https://github.com/phall1/libghostty-rs/release
 const PREBUILT_OPTIMIZE: &str = "ReleaseFast";
 const PREBUILT_CPU: &str = "baseline";
 
-/// `(Rust target, SHA-256 of its archive)` for every archive in the release
-/// of `GHOSTTY_COMMIT` (ghostty-vt-e82b76e98a26-releasefast-baseline, built
-/// with Zig 0.17.1 by .github/workflows/prebuilt.yml).
-const PREBUILT_ARCHIVES: &[(&str, &str)] = &[
-    ("aarch64-apple-darwin", "47e22974ca9cc41f810ce53d75c8898390a7b5595c72fc6f1ac87fc26b6bfb38"),
-    ("aarch64-unknown-linux-gnu", "5617bf8f50216c7c680732a67f6a17c1f32f5f5f77916c42a7933a29bdf1e6f8"),
-    ("x86_64-apple-darwin", "03b113ba787c2671169533590998485ead560c26d7e3bdb99d5895216ee3ce58"),
-    ("x86_64-unknown-linux-gnu", "502982f12789456abaf34835272260c66ed90f3d4a891bb0f65d6e0c1892f291"),
-];
+/// `(Rust target, SHA-256 of its archive)` for the exact `GHOSTTY_COMMIT`.
+/// No matching archives have been published for the API-boundary revision.
+/// Keep this source-only until an explicitly authorized release supplies them;
+/// checksums from a previous engine revision must never be reused.
+const PREBUILT_ARCHIVES: &[(&str, &str)] = &[];
 
 /// The release tag: the Ghostty commit and the build flavor.
 fn prebuilt_tag() -> String {
@@ -221,7 +217,15 @@ fn sha256_hex(data: &[u8]) -> String {
 
 #[cfg(test)]
 mod download_tests {
-    use super::sha256_hex;
+    use super::{LinkMode, prebuilt_checksum, sha256_hex};
+
+    #[test]
+    fn unpublished_engine_revision_uses_source_for_both_link_modes() {
+        for target in ["aarch64-apple-darwin", "x86_64-unknown-linux-gnu"] {
+            assert!(prebuilt_checksum(LinkMode::Static, target).is_none());
+            assert!(prebuilt_checksum(LinkMode::Dynamic, target).is_none());
+        }
+    }
 
     #[test]
     fn verifies_standard_sha256_vectors() {
