@@ -17,6 +17,7 @@ args = sys.argv[1:]
 with open(os.environ["FETCH_TEST_LOG"], "a") as log:
     log.write(json.dumps(args) + "\\n")
 if "--fetch=needed" in args:
+    assert Path(os.environ["ZIG_GLOBAL_CACHE_DIR"]) == Path(os.environ["OUT_DIR"]) / "zig-mirror-global-cache"
     manifest = Path("build.zig.zon").read_text()
     assert os.environ["FETCH_TEST_ARO"] in manifest
     assert "https://deps.files.ghostty.org/aro-d0c8c4d9c55daa7ef6e40cf0f630a5b5e900989b.tar.gz" in manifest

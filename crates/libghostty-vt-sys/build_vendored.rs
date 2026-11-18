@@ -223,6 +223,7 @@ fn prefetch_mirrored_aro(ghostty_dir: &Path, work_dir: &Path) {
         .arg(ghostty_dir.join("zig-pkg"))
         .arg("--cache-dir")
         .arg(work_dir.join("zig-cache"))
+        .env("ZIG_GLOBAL_CACHE_DIR", work_dir.join("zig-mirror-global-cache"))
         .current_dir(&shim);
     run(fetch, "fetch pinned aro from Ghostty mirror");
 }

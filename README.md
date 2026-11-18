@@ -75,7 +75,9 @@ This avoids the cold Codeberg git-fetch path that can abort Zig 0.17.
 The tiny manifest bootstrap follows Ghostty's `fetch-zig-cache.sh`;
 raw `zig fetch` alone is not sufficient with Zig 0.17's archive cache.
 It honors `ZIG` and does not run for explicit `GHOSTTY_ZIG_SYSTEM_DIR`
-builds. `python3 scripts/test_cold_build.py` exercises ordering, custom
+builds. Its bootstrap cache is private to the build so an archive left by
+an earlier raw `zig fetch` cannot break the hash-checked fetch.
+`python3 scripts/test_cold_build.py` exercises ordering, custom
 compiler selection, offline packages, and fail-closed fetching without
 network access or a native build.
 
