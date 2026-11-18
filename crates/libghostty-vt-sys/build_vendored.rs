@@ -185,6 +185,8 @@ impl ZigBuild<'_> {
                 .arg(&zig_system_dir)
                 // Zig 0.17 removed --global-cache-dir.
                 .env("ZIG_GLOBAL_CACHE_DIR", &zig_global_cache_dir);
+        } else {
+            prefetch_mirrored_aro(ghostty_dir, work_dir);
         }
 
         // Pass -Dtarget only for non-iOS cross targets; native builds let zig
@@ -197,6 +199,32 @@ impl ZigBuild<'_> {
 
         run(build, "zig build");
     }
+}
+
+/// Resolve translate_c's exact aro package through Ghostty's official mirror
+/// before Zig walks the nested Codeberg git URL. Cold Zig 0.17 builds can abort
+/// in that fetch path, before target compilation. Use the same hash-checked
+/// manifest/--pkg-dir bootstrap as Ghostty's fetch-zig-cache.sh: `zig fetch`
+/// alone only writes a compressed archive, whose reload is broken in 0.17.
+/// Explicit --system callers remain offline and bypass this entirely.
+fn prefetch_mirrored_aro(ghostty_dir: &Path, work_dir: &Path) {
+    let shim = work_dir.join("zig-mirrors");
+    std::fs::create_dir_all(&shim).expect("create Zig mirror bootstrap directory");
+    std::fs::write(shim.join("build.zig"), include_str!("zig-mirrors/build.zig"))
+        .expect("write Zig mirror bootstrap build");
+    std::fs::write(
+        shim.join("build.zig.zon"),
+        include_str!("zig-mirrors/build.zig.zon"),
+    )
+    .expect("write Zig mirror bootstrap manifest");
+    let mut fetch = Command::new(env::var_os("ZIG").unwrap_or_else(|| "zig".into()));
+    fetch
+        .args(["build", "--fetch=needed", "--pkg-dir"])
+        .arg(ghostty_dir.join("zig-pkg"))
+        .arg("--cache-dir")
+        .arg(work_dir.join("zig-cache"))
+        .current_dir(&shim);
+    run(fetch, "fetch pinned aro from Ghostty mirror");
 }
 
 /// Native builds install headers themselves. Wasm deliberately does not, but

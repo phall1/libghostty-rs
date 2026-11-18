@@ -69,6 +69,16 @@ checkout instead. Package managers that need network-free builds can also set
 to `zig build --system` so Zig does not download package dependencies during
 the Cargo build script.
 
+Online source builds first materialize `translate_c`'s exact `aro` package
+from Ghostty's official mirror, enforcing the original Zig package hash.
+This avoids the cold Codeberg git-fetch path that can abort Zig 0.17.
+The tiny manifest bootstrap follows Ghostty's `fetch-zig-cache.sh`;
+raw `zig fetch` alone is not sufficient with Zig 0.17's archive cache.
+It honors `ZIG` and does not run for explicit `GHOSTTY_ZIG_SYSTEM_DIR`
+builds. `python3 scripts/test_cold_build.py` exercises ordering, custom
+compiler selection, offline packages, and fail-closed fetching without
+network access or a native build.
+
 Vendored builds derive Zig's optimize mode from Cargo's profile: dev builds use
 `Debug`, size-optimized builds use `ReleaseSmall`, and other release builds use
 `ReleaseFast`. Set `LIBGHOSTTY_VT_SYS_OPTIMIZE` to `Debug`, `ReleaseSafe`,

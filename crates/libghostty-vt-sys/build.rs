@@ -114,6 +114,8 @@ fn main() {
         "prebuilt.rs",
         "shared_build.rs",
         "link_emit.rs",
+        "zig-mirrors/build.zig",
+        "zig-mirrors/build.zig.zon",
     ] {
         println!("cargo:rerun-if-changed={path}");
     }
