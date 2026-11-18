@@ -208,8 +208,15 @@ impl ZigBuild<'_> {
 /// alone only writes a compressed archive, whose reload is broken in 0.17.
 /// Explicit --system callers remain offline and bypass this entirely.
 fn prefetch_mirrored_aro(ghostty_dir: &Path, work_dir: &Path) {
+    // The fetch runs from the shim, not the caller's current directory. Resolve
+    // paths before switching cwd so relative GHOSTTY_SOURCE_DIR stays valid.
+    let package_dir = ghostty_dir
+        .canonicalize()
+        .expect("resolve Ghostty source directory")
+        .join("zig-pkg");
     let shim = work_dir.join("zig-mirrors");
     std::fs::create_dir_all(&shim).expect("create Zig mirror bootstrap directory");
+    let work_dir = work_dir.canonicalize().expect("resolve Zig build directory");
     std::fs::write(shim.join("build.zig"), include_str!("zig-mirrors/build.zig"))
         .expect("write Zig mirror bootstrap build");
     std::fs::write(
@@ -220,7 +227,7 @@ fn prefetch_mirrored_aro(ghostty_dir: &Path, work_dir: &Path) {
     let mut fetch = Command::new(env::var_os("ZIG").unwrap_or_else(|| "zig".into()));
     fetch
         .args(["build", "--fetch=needed", "--pkg-dir"])
-        .arg(ghostty_dir.join("zig-pkg"))
+        .arg(package_dir)
         .arg("--cache-dir")
         .arg(work_dir.join("zig-cache"))
         .env("ZIG_GLOBAL_CACHE_DIR", work_dir.join("zig-mirror-global-cache"))

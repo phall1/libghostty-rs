@@ -53,7 +53,7 @@ class ColdBuildTests(unittest.TestCase):
     def tearDownClass(cls):
         cls.temporary.cleanup()
 
-    def exercise(self, **overrides):
+    def exercise(self, *, relative_source=False, **overrides):
         directory = self.root / self._testMethodName
         directory.mkdir()
         source = directory / "source"
@@ -66,12 +66,13 @@ class ColdBuildTests(unittest.TestCase):
                if not k.startswith(("GHOSTTY_", "LIBGHOSTTY_", "DOCS_RS", "CARGO_CFG_MIRI"))}
         env.update(
             OUT_DIR=str(directory / "out"), HOST="aarch64-apple-darwin",
-            TARGET="aarch64-apple-darwin", GHOSTTY_SOURCE_DIR=str(source),
+            TARGET="aarch64-apple-darwin",
+            GHOSTTY_SOURCE_DIR="source" if relative_source else str(source),
             ZIG=str(compiler), ZIG_GLOBAL_CACHE_DIR=str(directory / "zig-cache"),
             FETCH_TEST_LOG=str(directory / "calls.jsonl"), FETCH_TEST_ARO=ARO,
         )
         env.update(overrides)
-        result = subprocess.run([str(self.script)], env=env, capture_output=True, text=True)
+        result = subprocess.run([str(self.script)], cwd=directory, env=env, capture_output=True, text=True)
         log = directory / "calls.jsonl"
         calls = [json.loads(line) for line in log.read_text().splitlines()] if log.exists() else []
         return result, calls
@@ -89,6 +90,15 @@ class ColdBuildTests(unittest.TestCase):
         self.assertEqual(len(calls), 1)
         self.assertIn("--system", calls[0])
         self.assertNotIn("--fetch=needed", calls[0])
+
+    def test_relative_source_prefetches_into_the_real_project_before_building(self):
+        result, calls = self.exercise(relative_source=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(len(calls), 2)
+        package_dir = Path(calls[0][calls[0].index("--pkg-dir") + 1])
+        self.assertEqual(package_dir, self.root / self._testMethodName / "source/zig-pkg")
+        self.assertTrue((package_dir / ARO).is_dir())
+        self.assertIn("-Demit-lib-vt=true", calls[1])
 
     def test_failed_mirror_fetch_never_runs_the_build(self):
         result, calls = self.exercise(FETCH_TEST_FAIL="1")
