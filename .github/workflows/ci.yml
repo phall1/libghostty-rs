@@ -44,6 +44,11 @@ jobs:
           name: ghostty
           skipPush: true
 
+      # Cargo does not run #[cfg(test)] code in build.rs. This also drives the
+      # real downloader against a tiny local-file mirror with inert git/Zig.
+      - name: Test prebuilt build-script policy
+        run: nix develop -c python3 scripts/test_prebuilt.py
+
       - name: Build package derivation
         run: nix build .#default --print-build-logs
 

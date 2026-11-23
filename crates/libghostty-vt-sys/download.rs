@@ -136,17 +136,34 @@ fn try_download_prebuilt(link_mode: LinkMode, target: &str) -> bool {
 
 /// Only consume an archive when every build-flavor input matches its manifest.
 fn prebuilt_checksum(link_mode: LinkMode, target: &str) -> Option<&'static str> {
-    if env::var("LIBGHOSTTY_VT_SYS_FROM_SOURCE").is_ok_and(|value| value == "1") {
+    let from_source = env::var("LIBGHOSTTY_VT_SYS_FROM_SOURCE").is_ok_and(|value| value == "1");
+    let sha256 = prebuilt_target_checksum(link_mode, target, from_source)?;
+    if !prebuilt_flavor_matches(zig_optimize_mode(), &zig_cpu()) {
+        return None;
+    }
+    Some(sha256)
+}
+
+// Keep policy inputs explicit so parallel unit tests never mutate process-wide
+// environment variables. Resolve the flavor only after finding a candidate,
+// preserving source/dynamic/unsupported-target short-circuit behavior.
+fn prebuilt_target_checksum(
+    link_mode: LinkMode,
+    target: &str,
+    from_source: bool,
+) -> Option<&'static str> {
+    if from_source {
         return None;
     }
     if !matches!(link_mode, LinkMode::Static) {
         return None;
     }
     let &(_, sha256) = PREBUILT_ARCHIVES.iter().find(|(name, _)| *name == target)?;
-    if zig_optimize_mode() != PREBUILT_OPTIMIZE || zig_cpu() != PREBUILT_CPU {
-        return None;
-    }
     Some(sha256)
+}
+
+fn prebuilt_flavor_matches(optimize: &str, cpu: &str) -> bool {
+    optimize == PREBUILT_OPTIMIZE && cpu == PREBUILT_CPU
 }
 
 /// Run `command`, returning a one-line reason when it cannot start or fails.
@@ -231,20 +248,89 @@ fn sha256_hex(data: &[u8]) -> String {
 
 #[cfg(test)]
 mod download_tests {
-    use super::{LinkMode, prebuilt_checksum, sha256_hex};
+    use super::{
+        LinkMode, PREBUILT_ARCHIVES, prebuilt_flavor_matches, prebuilt_target_checksum, sha256_hex,
+    };
 
     #[test]
-    fn unpublished_engine_revision_uses_source_for_both_link_modes() {
-        for target in ["aarch64-apple-darwin", "x86_64-unknown-linux-gnu"] {
-            assert!(prebuilt_checksum(LinkMode::Static, target).is_none());
-            assert!(prebuilt_checksum(LinkMode::Dynamic, target).is_none());
+    fn published_static_targets_have_exact_checksums() {
+        let expected = [
+            (
+                "aarch64-apple-darwin",
+                "0e67e9e051643de76ee7b6a9e164aec4156f54433f67836b8b1f8a502d2c23fb",
+            ),
+            (
+                "aarch64-unknown-linux-gnu",
+                "7a7a44c6e25df2d23919876fe4321ce14d6722b4252bd18f2f7ccc571a9eb23c",
+            ),
+            (
+                "x86_64-apple-darwin",
+                "2fc07dfbeb8d45c47eb9bc77188ea24c343c6c7738e567b48943c8a83806c693",
+            ),
+            (
+                "x86_64-unknown-linux-gnu",
+                "a955a99505c0dc4626df9f9fd677991d1a6add6ca884343b3d230129b37bc9e2",
+            ),
+        ];
+        assert_eq!(PREBUILT_ARCHIVES, expected);
+        for (target, checksum) in expected {
+            assert_eq!(
+                prebuilt_target_checksum(LinkMode::Static, target, false),
+                Some(checksum)
+            );
+            assert_eq!(
+                prebuilt_target_checksum(LinkMode::Dynamic, target, false),
+                None
+            );
+            assert_eq!(
+                prebuilt_target_checksum(LinkMode::Static, target, true),
+                None
+            );
+        }
+    }
+
+    #[test]
+    fn unsupported_targets_use_source() {
+        for target in [
+            "x86_64-unknown-linux-musl",
+            "aarch64-unknown-linux-musl",
+            "aarch64-apple-ios",
+            "aarch64-apple-ios-sim",
+            "wasm32-unknown-unknown",
+            "x86_64-pc-windows-msvc",
+            "not-a-target",
+        ] {
+            assert_eq!(
+                prebuilt_target_checksum(LinkMode::Static, target, false),
+                None
+            );
+        }
+    }
+
+    #[test]
+    fn only_releasefast_baseline_matches_the_published_flavor() {
+        assert!(prebuilt_flavor_matches("ReleaseFast", "baseline"));
+        for optimize in ["Debug", "ReleaseSafe", "ReleaseSmall"] {
+            assert!(!prebuilt_flavor_matches(optimize, "baseline"));
+        }
+        for cpu in ["native", "x86_64_v3", "apple_m1", ""] {
+            assert!(!prebuilt_flavor_matches("ReleaseFast", cpu));
         }
     }
 
     #[test]
     fn verifies_standard_sha256_vectors() {
-        assert_eq!(sha256_hex(b""), "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855");
-        assert_eq!(sha256_hex(b"abc"), "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad");
-        assert_eq!(sha256_hex(&vec![b'a'; 1_000_000]), "cdc76e5c9914fb9281a1c7e284d73e67f1809a48a497200e046d39ccc7112cd0");
+        assert_eq!(
+            sha256_hex(b""),
+            "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        );
+        assert_eq!(
+            sha256_hex(b"abc"),
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        );
+        assert_eq!(
+            sha256_hex(&vec![b'a'; 1_000_000]),
+            "cdc76e5c9914fb9281a1c7e284d73e67f1809a48a497200e046d39ccc7112cd0"
+        );
     }
 }
