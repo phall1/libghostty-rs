@@ -19,10 +19,24 @@ const PREBUILT_OPTIMIZE: &str = "ReleaseFast";
 const PREBUILT_CPU: &str = "baseline";
 
 /// `(Rust target, SHA-256 of its archive)` for the exact `GHOSTTY_COMMIT`.
-/// No matching archives have been published for the API-boundary revision.
-/// Keep this source-only until an explicitly authorized release supplies them;
-/// checksums from a previous engine revision must never be reused.
-const PREBUILT_ARCHIVES: &[(&str, &str)] = &[];
+const PREBUILT_ARCHIVES: &[(&str, &str)] = &[
+    (
+        "aarch64-apple-darwin",
+        "0e67e9e051643de76ee7b6a9e164aec4156f54433f67836b8b1f8a502d2c23fb",
+    ),
+    (
+        "aarch64-unknown-linux-gnu",
+        "7a7a44c6e25df2d23919876fe4321ce14d6722b4252bd18f2f7ccc571a9eb23c",
+    ),
+    (
+        "x86_64-apple-darwin",
+        "2fc07dfbeb8d45c47eb9bc77188ea24c343c6c7738e567b48943c8a83806c693",
+    ),
+    (
+        "x86_64-unknown-linux-gnu",
+        "a955a99505c0dc4626df9f9fd677991d1a6add6ca884343b3d230129b37bc9e2",
+    ),
+];
 
 /// The release tag: the Ghostty commit and the build flavor.
 fn prebuilt_tag() -> String {
